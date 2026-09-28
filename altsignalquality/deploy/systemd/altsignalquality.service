@@ -1,0 +1,45 @@
+[Unit]
+Description=AltSignalQuality — validity gate between AltStrategy and VPS2 (no learned veto)
+Wants=network-online.target
+After=network-online.target nats-server.service postgresql.service altstrategy.service
+# No start limit; the restart DELAY is what is bounded (see [Service]).
+# A start budget of 6 per 5 min cannot tell a permanent error from a
+# transient one: the process exits within 0.1 s when PostgreSQL is down, so
+# six 10-s restarts spent the budget in about a minute and systemd then
+# stopped restarting it for good -- a PostgreSQL restart or crash recovery
+# longer than that left this stage dead after the database came back
+# (reproduced 2026-09-26 on a transient unit: "Start request repeated too
+# quickly"). A permanent error now retries every 5 minutes, each attempt
+# logged as critical, which is visible rather than silently final.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=altsignalquality
+Group=altsignalquality
+EnvironmentFile=/etc/altsignalquality/common.env
+ExecStart=/opt/altsignalquality/bin/altsignalquality run \
+    --config /etc/altsignalquality/altsignalquality.yaml
+Restart=on-failure
+RestartSec=10
+# 10 s after the first failure, growing to 5 min over five steps.
+RestartSteps=5
+RestartMaxDelaySec=5min
+KillSignal=SIGTERM
+TimeoutStartSec=5min
+TimeoutStopSec=45
+# Liveness: the supervisor pings at half this budget; a wedged main loop is
+# killed and restarted instead of hanging silently.
+WatchdogSec=60
+# In-process training needs headroom above the serving footprint; the trainer
+# self-bounds via training.max_matrix_mib and defers under load
+# (JOB_DEFERRED_RESOURCE_PRESSURE). Sized for the shared test VPS — revisit
+# once real memory usage is measured.
+MemoryMax=768M
+CPUQuota=100%
+# The trainer writes immutable model directories under /var/lib/altsignalquality/models;
+# ProtectSystem=strict keeps everything else read-only.
+ReadWritePaths=/var/lib/altsignalquality
+
+[Install]
+WantedBy=multi-user.target

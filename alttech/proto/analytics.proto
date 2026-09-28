@@ -1,0 +1,256 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+
+// ---------------------------------------------------------------------------
+// Analytics output contract.
+//
+// Feature-style records carry an ordered `values` array plus a validity bitmap;
+// the value order is defined by a feature set (name + version + schema_hash)
+// resolved through PostgreSQL, so adding a metric never changes the wire shape.
+// Structured records (quality, alignment, zones, regimes) use typed fields.
+//
+// Venue bitmasks: bit (exchange_id - 1) is set for that venue, i.e. bit 0
+// Bitget, bit 1 Binance USDⓈ-M, bit 2 OKX, bit 3 Bybit — matching the Exchange
+// enum numeric values.
+// ---------------------------------------------------------------------------
+
+enum AnalyticsVectorStatus {
+    ANALYTICS_VECTOR_STATUS_UNSPECIFIED = 0;
+    ANALYTICS_VECTOR_STATUS_NOT_READY = 1;
+    ANALYTICS_VECTOR_STATUS_WARMING = 2;
+    ANALYTICS_VECTOR_STATUS_VALID = 3;
+    ANALYTICS_VECTOR_STATUS_INCOMPLETE_INPUT = 4;
+    ANALYTICS_VECTOR_STATUS_REVISED = 5;
+    ANALYTICS_VECTOR_STATUS_INVALID = 6;
+}
+
+// Per-venue contribution to a cross-venue consensus, retained for
+// reproducibility. One entry per participating venue.
+message VenueContribution {
+    Exchange exchange = 1;
+    double weight = 2;              // normalized quality/liquidity weight [0,1]
+    double value = 3;              // the venue value that entered the estimator
+    bool included = 4;             // false if trimmed / excluded as outlier
+    double freshness_ms = 5;       // snapshot age used for weighting
+    double relative_spread = 6;
+    double depth_usdt = 7;
+    QualityState quality = 8;
+    string exclude_reason = 9;     // empty when included
+}
+
+// One venue-scoped feature vector for one closed bar. The profile distinguishes
+// the primary venue's full set from the lighter reference-venue set.
+message VenueFeatureVector {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_VENUE
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    Timeframe timeframe = 5;
+    int64 bar_open_time_ms = 6;
+    int64 bar_revision = 7;
+    string profile = 8;            // bitget_core | reference_lite
+    string feature_set_name = 9;
+    int32 feature_set_version = 10;
+    string schema_hash = 11;
+    string engine_version = 12;
+    repeated float values = 13 [packed = true];
+    bytes validity_bitmap = 14;
+    AnalyticsVectorStatus status = 15;
+    QualityState venue_quality = 16;
+    int64 analytics_revision = 17;
+    int64 computed_at_ms = 18;
+}
+
+// One cross-venue consensus feature vector for one canonical pair and timeframe.
+// Consensus price, flow, funding, open-interest and liquidity metrics are
+// carried as ordered members; the venue masks and quality status make a degraded
+// window explicit rather than silently averaging over missing venues.
+message CrossVenueFeatureVector {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_CROSS_VENUE
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    int64 bar_open_time_ms = 4;
+    string feature_set_name = 5;   // cross_venue_core
+    int32 feature_set_version = 6;
+    string schema_hash = 7;
+    string method_version = 8;     // consensus method + version, reproducible
+    repeated float values = 9 [packed = true];
+    bytes validity_bitmap = 10;
+    AnalyticsVectorStatus status = 11;
+    CrossVenueQualityStatus quality_status = 12;
+    uint32 venue_mask = 13;
+    uint32 missing_venue_mask = 14;
+    uint32 stale_venue_mask = 15;
+    uint32 desynced_venue_mask = 16;
+    double confidence = 17;
+    repeated VenueContribution contributions = 18;
+    int64 analytics_revision = 19;
+    int64 computed_at_ms = 20;
+}
+
+// One venue-scoped microstructure window.
+message VenueMicrostructureVector {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_VENUE
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    string window_label = 5;       // 1s | 5s | 15s | 30s | 1m
+    int64 window_start_ms = 6;
+    string profile = 7;            // bitget_full | reference_lite
+    string feature_set_name = 8;
+    int32 feature_set_version = 9;
+    string schema_hash = 10;
+    string engine_version = 11;
+    repeated float values = 12 [packed = true];
+    bytes validity_bitmap = 13;
+    AnalyticsVectorStatus status = 14;
+    QualityState venue_quality = 15;
+    int64 computed_at_ms = 16;
+}
+
+// Zone lifecycle shared by venue, consensus and projected zones.
+enum ZoneLifecycle {
+    ZONE_LIFECYCLE_UNSPECIFIED = 0;
+    ZONE_LIFECYCLE_CANDIDATE = 1;
+    ZONE_LIFECYCLE_ACTIVE = 2;
+    ZONE_LIFECYCLE_TESTED = 3;
+    ZONE_LIFECYCLE_WEAKENED = 4;
+    ZONE_LIFECYCLE_BROKEN = 5;
+    ZONE_LIFECYCLE_FLIPPED = 6;
+    ZONE_LIFECYCLE_EXPIRED = 7;
+}
+
+message VenueStructureZone {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_VENUE (VENUE_ZONE)
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    Timeframe timeframe = 5;
+    string kind = 6;               // support | resistance | dynamic
+    double lower_price = 7;
+    double center_price = 8;
+    double upper_price = 9;
+    double strength = 10;
+    double confidence = 11;
+    ZoneLifecycle lifecycle = 12;
+    string algorithm_version = 13;
+    int64 zone_id = 14;
+    int64 updated_at_ms = 15;
+}
+
+message ConsensusStructureZone {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_CROSS_VENUE (CONSENSUS_ZONE)
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    double normalized_center = 4;  // position relative to each venue's own mid
+    double normalized_width = 5;
+    uint32 supporting_venue_mask = 6;
+    int32 supporting_venue_count = 7;
+    double venue_confluence_score = 8;
+    double strength = 9;
+    double confidence = 10;
+    ZoneLifecycle lifecycle = 11;
+    CrossVenueQualityStatus quality_status = 12;
+    string algorithm_version = 13;
+    int64 zone_id = 14;
+    int64 updated_at_ms = 15;
+}
+
+message BitgetProjectedZone {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_BITGET_PROJECTED
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    int64 source_consensus_zone_id = 4;
+    double bitget_basis_adjustment = 5;
+    double projected_lower = 6;
+    double projected_center = 7;
+    double projected_upper = 8;
+    double projection_quality = 9;
+    int64 projection_time_ms = 10;
+    string algorithm_version = 11;
+}
+
+// Deterministic market regime, shared by the venue and global scopes.
+enum GlobalRegime {
+    GLOBAL_REGIME_UNSPECIFIED = 0;
+    GLOBAL_REGIME_UNDEFINED = 1;
+    GLOBAL_REGIME_LOW_LIQUIDITY = 2;
+    GLOBAL_REGIME_CHAOTIC = 3;
+    GLOBAL_REGIME_TREND_UP = 4;
+    GLOBAL_REGIME_TREND_DOWN = 5;
+    GLOBAL_REGIME_BREAKOUT = 6;
+    GLOBAL_REGIME_VOLATILITY_EXPANSION = 7;
+    GLOBAL_REGIME_VOLATILITY_COMPRESSION = 8;
+    GLOBAL_REGIME_RANGE = 9;
+}
+
+message VenueMarketRegime {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_VENUE
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    Timeframe timeframe = 5;
+    int64 bar_open_time_ms = 6;
+    GlobalRegime regime = 7;
+    double confidence = 8;
+    double trend_strength = 9;
+    double volatility_regime = 10;
+    double liquidity_quality = 11;
+    double data_quality = 12;
+    string algorithm_version = 13;
+}
+
+message GlobalMarketRegime {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_CROSS_VENUE
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    int64 bar_open_time_ms = 4;
+    GlobalRegime primary_regime = 5;
+    double regime_confidence = 6;
+    double venue_agreement = 7;
+    double venue_dispersion = 8;
+    uint32 supporting_venue_mask = 9;
+    bool bitget_regime_divergence = 10;
+    double trend_consensus = 11;
+    double volatility_consensus = 12;
+    double liquidity_consensus = 13;
+    CrossVenueQualityStatus quality_status = 14;
+    string algorithm_version = 15;
+}
+
+// Cross-venue aggregate quality summary for one canonical pair window
+//. Reasons are free-form machine tags, e.g. "okx:stale".
+message CrossVenueQuality {
+    int64 canonical_pair_id = 1;
+    Timeframe timeframe = 2;
+    int64 bar_open_time_ms = 3;
+    CrossVenueQualityStatus quality_status = 4;
+    uint32 venue_mask = 5;
+    uint32 missing_venue_mask = 6;
+    uint32 stale_venue_mask = 7;
+    uint32 desynced_venue_mask = 8;
+    double confidence = 9;
+    repeated string quality_reasons = 10;
+    int64 observed_at_ms = 11;
+}
+
+// Event-time bar-window alignment record for one canonical pair window
+//.
+message VenueAlignment {
+    int64 canonical_pair_id = 1;
+    Timeframe timeframe = 2;
+    int64 canonical_open_time_ms = 3;
+    int64 canonical_close_time_ms = 4;
+    int64 watermark_time_ms = 5;
+    uint32 venue_mask = 6;
+    uint32 missing_venue_mask = 7;
+    uint32 late_venue_mask = 8;
+    uint32 revised_venue_mask = 9;
+    AlignmentStatus alignment_status = 10;
+    double max_cross_venue_skew_ms = 11;
+    int64 observed_at_ms = 12;
+}
+

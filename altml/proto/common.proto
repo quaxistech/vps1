@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package altml.v1;
+
+// Exact fixed-point decimal: value = mantissa * 10^(-scale).
+// Bitget decimal strings are parsed digit-by-digit; binary floating point is never involved.
+message Decimal {
+    sint64 mantissa = 1;
+    int32 scale = 2; // 0..18
+}
+
+enum Exchange {
+    EXCHANGE_UNSPECIFIED = 0;
+    EXCHANGE_BITGET = 1;
+    EXCHANGE_BINANCE = 2;
+    EXCHANGE_OKX = 3;
+    EXCHANGE_BYBIT = 4;
+}
+
+// Enum value == interval length in minutes.
+enum Timeframe {
+    TIMEFRAME_UNSPECIFIED = 0;
+    TF_1M = 1;
+    TF_5M = 5;
+    TF_15M = 15;
+    TF_30M = 30;
+    TF_1H = 60;
+    TF_4H = 240;
+    TF_1D = 1440;
+}
+
+enum CandleSource {
+    CANDLE_SOURCE_UNSPECIFIED = 0;
+    CANDLE_SOURCE_WS = 1;
+    CANDLE_SOURCE_REST_BOOTSTRAP = 2;
+    CANDLE_SOURCE_REST_RECONCILE = 3;
+    CANDLE_SOURCE_REST_REPAIR = 4;
+    CANDLE_SOURCE_AGGREGATION = 5;
+}
+
+enum QualityStatus {
+    QUALITY_UNSPECIFIED = 0;
+    QUALITY_OK = 1;
+    QUALITY_INCOMPLETE = 2;
+    QUALITY_SUSPECT = 3;
+}

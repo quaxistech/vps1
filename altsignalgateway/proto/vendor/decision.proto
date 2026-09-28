@@ -1,0 +1,734 @@
+syntax = "proto3";
+
+// altstrategy.v1 — AltStrategy's OWNED adaptive-decision contract (first
+// released version).
+//
+// This is the production contract for the adaptive multi-strategy decision
+// engine: the DecisionContext, the three-tier output (StrategyCandidate ->
+// RankedTradeProposal -> TradeSignalProposal), the learning-loop records and
+// the adaptive state. Field numbers are frozen once a consumer ships (guard:
+// tests/unit/test_wire_contract.cpp).
+//
+// AltStrategy publishes DECISIONS, never orders. No position size, leverage,
+// account balance or exchange order id ever appears on this contract.
+package altstrategy.v1;
+
+// ------------------------------ enums ---------------------------------------
+
+enum Side {
+    SIDE_UNSPECIFIED = 0;
+    SIDE_LONG = 1;
+    SIDE_SHORT = 2;
+}
+
+enum StrategyFamily {
+    FAMILY_UNSPECIFIED = 0;
+    FAMILY_TREND = 1;
+    FAMILY_BREAKOUT = 2;
+    FAMILY_MEAN_REVERSION = 3;
+    FAMILY_CROSS_VENUE = 4;
+    FAMILY_VWAP = 5;
+    FAMILY_CROWDING = 6;
+}
+
+// Strategy lifecycle status (§13, §40).
+enum LifecycleStatus {
+    LIFECYCLE_STATUS_UNSPECIFIED = 0;
+    LIFECYCLE_RESEARCH = 1;
+    LIFECYCLE_BACKTESTED = 2;
+    LIFECYCLE_SHADOW = 3;
+    LIFECYCLE_CANDIDATE = 4;
+    LIFECYCLE_LIMITED = 5;
+    LIFECYCLE_ACTIVE = 6;
+    LIFECYCLE_DEGRADED = 7;
+    LIFECYCLE_DISABLED = 8;
+    LIFECYCLE_RETIRED = 9;
+}
+
+enum HoldingClass {
+    HOLDING_CLASS_UNSPECIFIED = 0;
+    HOLDING_SCALP = 1;              // 1–30 minutes
+    HOLDING_INTRADAY = 2;          // 30 minutes–8 hours
+    HOLDING_EXTENDED_INTRADAY = 3; // 8–48 hours
+}
+
+// Proposal strength grade (§9). INVALID is the only grade forbidden from being
+// published as an executable proposal.
+enum ProposalGrade {
+    PROPOSAL_GRADE_UNSPECIFIED = 0;
+    GRADE_STRONG = 1;
+    GRADE_NORMAL = 2;
+    GRADE_WEAK = 3;
+    GRADE_EXPERIMENTAL = 4;
+    GRADE_SHADOW = 5;
+    GRADE_INVALID = 6;
+}
+
+enum EntryType {
+    ENTRY_TYPE_UNSPECIFIED = 0;
+    ENTRY_MARKET = 1;
+    ENTRY_LIMIT = 2;
+    ENTRY_STOP_MARKET = 3;
+    ENTRY_STOP_LIMIT = 4;
+}
+
+enum SelectionMode {
+    SELECTION_MODE_UNSPECIFIED = 0;
+    SELECTION_EXPLOIT = 1;
+    SELECTION_EXPLORE_SHADOW = 2;
+}
+
+enum PlanProfile {
+    PLAN_PROFILE_UNSPECIFIED = 0;
+    PLAN_AGGRESSIVE = 1;
+    PLAN_BALANCED = 2;
+    PLAN_CONSERVATIVE = 3;
+}
+
+// Proposal state machine (§30). APPROVED is deliberately absent; the strategy-
+// side terminal-before-execution state is PROPOSED (documented as
+// STRATEGY_APPROVED). RISK_APPROVED / EXECUTION_ACCEPTED belong downstream.
+enum ProposalState {
+    PROPOSAL_STATE_UNSPECIFIED = 0;
+    STATE_DRAFT = 1;
+    STATE_CONTEXT_READY = 2;
+    STATE_CANDIDATES_GENERATED = 3;
+    STATE_RANKED = 4;
+    STATE_PLANS_GENERATED = 5;
+    STATE_ML_EVALUATED = 6;
+    STATE_PROPOSED = 7;
+    STATE_SUPERSEDED = 8;
+    STATE_EXPIRED = 9;
+    STATE_CANCELLED = 10;
+    STATE_ENTRY_EXPIRED = 11;
+    STATE_OUTCOME_PENDING = 12;
+    STATE_OUTCOME_FINAL = 13;
+}
+
+// Ranking result classification (§20).
+enum RankingResult {
+    RANKING_RESULT_UNSPECIFIED = 0;
+    RANKING_RECOMMENDED = 1;
+    RANKING_MULTIPLE_CLOSE = 2;
+    RANKING_CONFLICTED = 3;
+    RANKING_NO_CLEAR_WINNER = 4;
+    RANKING_NO_CANDIDATES = 5;
+}
+
+// Market-reconstructed outcome (§35). Independent of execution.
+enum MarketOutcomeType {
+    MARKET_OUTCOME_UNSPECIFIED = 0;
+    OUTCOME_ENTRY_NOT_REACHED = 1;
+    OUTCOME_ENTRY_EXPIRED = 2;
+    OUTCOME_TARGET_FIRST = 3;
+    OUTCOME_STOP_FIRST = 4;
+    OUTCOME_TIME_STOP = 5;
+    OUTCOME_CANCELLED = 6;
+    OUTCOME_AMBIGUOUS = 7;
+    OUTCOME_DATA_INCOMPLETE = 8;
+}
+
+// Reconstruction path source, most-precise first (§35).
+enum OutcomePathSource {
+    OUTCOME_PATH_UNSPECIFIED = 0;
+    PATH_RAW_TRADES = 1;
+    PATH_1S_TRADE_AGG = 2;
+    PATH_1S_PRICE_BOOK_AGG = 3;
+    PATH_1M_CANDLES = 4;
+}
+
+enum DriftStatus {
+    DRIFT_STATUS_UNSPECIFIED = 0;
+    DRIFT_STABLE = 1;
+    DRIFT_WATCH = 2;
+    DRIFT_DEGRADED = 3;
+    DRIFT_STRUCTURAL_BREAK = 4;
+}
+
+// Cross-venue aggregate quality mirrored into the context (§7).
+enum ContextQuality {
+    CONTEXT_QUALITY_UNSPECIFIED = 0;
+    CONTEXT_STRICT_4_OF_4 = 1;
+    CONTEXT_DEGRADED_3_OF_4 = 2;
+    CONTEXT_DEGRADED_2_OF_4 = 3;
+    CONTEXT_INVALID = 4;
+}
+
+// ------------------------------ DecisionContext (§7) ------------------------
+
+// A structured feature summary carried inside the DecisionContext. Ordered
+// analytics vectors are summarized into named scalars the strategies consume.
+message FeatureSummary {
+    map<string, double> values = 1;   // named metric -> value
+    int64 bar_open_time_ms = 2;
+    int64 revision = 3;
+    bool valid = 4;
+}
+
+message RegimeView {
+    string regime = 1;                // GlobalRegime name
+    double confidence = 2;
+    double trend_strength = 3;
+    double volatility_regime = 4;
+    double liquidity_quality = 5;
+    int64 bar_open_time_ms = 6;
+}
+
+message ProjectedZone {
+    int64 zone_id = 1;
+    string kind = 2;                  // support | resistance | dynamic
+    double lower = 3;
+    double center = 4;
+    double upper = 5;
+    double strength = 6;
+    double confidence = 7;
+    string lifecycle = 8;
+}
+
+// Mirrors what AltML actually produces. The removed tags (5-18) described a
+// forecast nobody computes: a flat-class probability, three sets of quantiles,
+// a volatility quantile, an uncertainty score and an OOD score. They were
+// serialised into every outgoing signal as zeros, where `ood_score: 0` reads as
+// a measured all-clear. Tags are RESERVED rather than reused so an old reader
+// cannot silently mis-parse a new message.
+message MarketForecastView {
+    reserved 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22;
+    reserved "p_flat", "net_return_q50", "net_return_q25", "net_return_q75",
+             "mfe_q50", "mfe_q75", "mfe_q90", "mae_q50", "mae_q75", "mae_q90",
+             "volatility_q50", "uncertainty_score", "ood_score", "quality_route",
+             "available_at_ms", "expires_at_ms";
+
+    bool present = 1;
+    bool abstain = 2;
+    double p_up = 3;
+    double p_down = 4;
+    int64 feature_revision = 19;
+    string prediction_id = 20;
+
+    double expected_return = 23;
+    double probability_target_before_stop = 24;
+    double expected_mfe = 25;
+    double expected_mae = 26;
+    double expected_holding_time_min = 27;
+    // |p_up - 0.5| * 2 -- distance from a coin flip, not an uncertainty estimate.
+    double conviction = 28;
+    string quality_status = 29;
+    string model_id = 30;
+    int32 model_version = 31;
+    string feature_set_version = 32;
+    int32 prediction_schema_version = 33;
+    int64 bar_open_time_ms = 34;
+    int64 computed_at_ms = 35;
+    // schema 2 econ estimate (see altml_forecast.proto)
+    int32 horizon_minutes = 36;
+    double p_long = 37;
+    double p_neutral = 38;
+    double p_short = 39;
+    double expected_net_long_bps = 40;
+    double expected_net_short_bps = 41;
+    double round_trip_cost_bps = 42;
+    bool econ = 43;
+}
+
+// The atomic, versioned DecisionContext (§7). Assembled by context_assembler
+// from AltSpotter universe + AltTech analytics + AltML forecast. Never stitched
+// from unrelated stale messages without revision/availability semantics.
+message DecisionContext {
+    string context_id = 1;
+    int64 canonical_pair_id = 2;
+    int64 bitget_instrument_id = 3;
+    int64 event_time_ms = 4;
+    int64 available_at_ms = 5;
+    int64 expires_at_ms = 6;
+    int64 context_revision = 7;
+
+    string global_universe_status = 8;  // ELIGIBLE_ALL_VENUES / MISSING_ON_* / EXCLUDED
+    ContextQuality data_quality = 9;
+    uint32 venue_mask = 10;
+    uint32 missing_venue_mask = 11;
+    bool regime_divergence = 12;
+
+    FeatureSummary bitget_features = 13;
+    FeatureSummary reference_features = 14;
+    FeatureSummary cross_venue_features = 15;
+    FeatureSummary microstructure = 16;
+
+    RegimeView bitget_regime = 17;
+    RegimeView global_regime = 18;
+
+    repeated ProjectedZone bitget_projected_zones = 19;
+    string bitget_structure = 20;       // committed structure summary tag
+    string consensus_structure = 21;
+
+    MarketForecastView market_forecast = 22;
+
+    double fees_bps = 23;
+    double funding_rate = 24;
+    double mark_price = 25;
+    double index_price = 26;
+    double spread_bps = 27;
+    double top_depth_usdt = 28;
+    double liquidity_rank = 29;
+    double expected_slippage_bps = 30;
+
+    string feature_manifest_hash = 31;
+    map<string, string> producer_versions = 32;
+    string symbol = 33;                 // canonical symbol string (diagnostics)
+}
+
+// Lightweight reference published on the wire; the full context is persisted.
+message DecisionContextRef {
+    string context_id = 1;
+    int64 canonical_pair_id = 2;
+    int64 context_revision = 3;
+    int64 event_time_ms = 4;
+    int64 available_at_ms = 5;
+    int64 expires_at_ms = 6;
+    ContextQuality data_quality = 7;
+    string feature_manifest_hash = 8;
+}
+
+// ------------------------------ tier 1: StrategyCandidate (§8.1) ------------
+
+message StrategyCandidate {
+    string candidate_id = 1;
+    int64 canonical_pair_id = 2;
+    string strategy_id = 3;
+    string strategy_version = 4;
+    string parameter_set_id = 5;
+    StrategyFamily strategy_family = 6;
+    Side side = 7;
+    int64 setup_time_ms = 8;
+    int64 created_at_ms = 9;
+    int64 expires_at_ms = 10;
+    string context_id = 11;
+    int64 context_revision = 12;
+
+    double raw_setup_score = 13;
+    double static_score = 14;
+    double adaptive_score = 15;
+    double strategy_prior = 16;
+    double strategy_posterior = 17;
+    double posterior_uncertainty = 18;
+    double effective_sample_size = 19;
+
+    int64 expected_horizon_ms = 20;
+    HoldingClass holding_class = 21;
+    double entry_hint = 22;
+    double invalidation_hint = 23;
+    double target_hint = 24;
+
+    string bitget_regime = 25;
+    string global_regime = 26;
+    double cross_venue_confirmation = 27;
+
+    MarketForecastView ml_context = 28;
+    ContextQuality quality = 29;
+    repeated string warnings = 30;
+    repeated string reason_codes = 31;
+    SelectionMode selection_mode = 32;
+    LifecycleStatus lifecycle_status = 33;
+    // The economic policy's verdict (POSITIVE_EDGE, NO_EDGE, ML_MISSING, ...)
+    string econ_state = 34;
+    int32 econ_horizon_minutes = 35;
+    optional double econ_expected_net_bps = 36;   // absent unless evaluated
+}
+
+// ------------------------------ tier 2: RankedTradeProposal (§8.2) ----------
+
+message RankedCandidate {
+    string candidate_id = 1;
+    string strategy_id = 2;
+    StrategyFamily strategy_family = 3;
+    Side side = 4;
+    double final_score = 5;
+    double adaptive_weight = 6;
+    double posterior_edge = 7;
+    int32 rank = 8;
+    SelectionMode selection_mode = 9;
+    repeated string score_component_keys = 10;
+    repeated double score_component_values = 11;
+}
+
+message StrategyEnsembleView {
+    Side ensemble_direction = 1;
+    double ensemble_agreement = 2;
+    repeated string supporting_strategies = 3;
+    repeated StrategyFamily supporting_families = 4;
+    repeated string conflicting_strategies = 5;
+    repeated StrategyFamily conflicting_families = 6;
+    double family_independence_score = 7;
+    double plan_dispersion = 8;
+}
+
+message RankedTradeProposal {
+    string ranking_id = 1;
+    int64 canonical_pair_id = 2;
+    string context_id = 3;
+    string ranking_policy_id = 4;
+    string ranking_policy_version = 5;
+    int64 created_at_ms = 6;
+    repeated RankedCandidate ranked_candidates = 7;
+    StrategyEnsembleView ensemble = 8;
+    double ranking_uncertainty = 9;
+    double ranking_regret_estimate = 10;
+    string recommended_candidate_id = 11;
+    RankingResult result = 12;
+    bool is_challenger = 13;            // true = shadow challenger snapshot
+}
+
+// ------------------------------ trade plan variant (§22) --------------------
+
+message TradePlanVariant {
+    string variant_id = 1;
+    string candidate_id = 2;
+    string context_id = 3;
+    int64 canonical_pair_id = 4;
+    PlanProfile profile = 5;
+    Side side = 6;
+    EntryType entry_type = 7;
+    double entry_price = 8;
+    double entry_lower = 9;
+    double entry_upper = 10;
+    double trigger_price = 11;
+    double stop_loss_price = 12;
+    double take_profit_price = 13;
+    double optional_secondary_target = 14;
+    int64 max_holding_time_ms = 15;
+    int64 time_stop_at_ms = 16;
+    double expected_fill_time_p50_min = 17;
+    double expected_fill_time_p90_min = 18;
+    int64 entry_fill_timeout_ms = 19;
+    double stop_distance_bps = 20;
+    double stop_distance_atr = 21;
+    double target_distance_bps = 22;
+    double expected_rr = 23;
+    string stop_basis = 24;
+    string target_basis = 25;
+    string invalidation_reason = 26;
+    bool post_only_allowed = 27;
+    double max_slippage_bps = 28;
+}
+
+// ------------------------------ tier 3: TradeSignalProposal (§8.3) ----------
+
+message ProposalWarning {
+    string code = 1;
+    string detail = 2;
+    string severity = 3;   // info | warning | risk_flag
+}
+
+// One horizon's market prediction (signal semantics vps1-signal-1): what AltML
+// expects the MARKET to do over the horizon after this state, in the LONG
+// perspective. Numbers are meaningful only when has_values is true; `state`
+// says why they are absent or degraded. See docs/PREDICTION_CONTRACT.md.
+message MarketPrediction {
+    int32 horizon_minutes = 1;
+    string state = 2;                      // PRESENT | INCOMPLETE | STALE | ABSTAIN | INCOMPATIBLE | MISSING
+    bool has_values = 3;
+    string model_id = 4;
+    int32 model_version = 5;
+    string model_role = 6;                 // ACTIVE | SHADOW
+    string objective = 7;
+    string calibration_version = 8;
+    bool probability_calibrated = 9;       // passed AltML's holdout calibration test
+    double p_up = 10;
+    double p_flat = 11;
+    double p_down = 12;
+    double expected_return_bps = 13;
+    double expected_up_excursion_bps = 14;     // >= 0
+    double expected_down_excursion_bps = 15;   // >= 0
+    int64 bar_open_time_ms = 16;           // the 1m bar the prediction was made on
+    int64 computed_at_ms = 17;
+    int32 aligned_missing = 18;
+    // Economic DIAGNOSTIC from AltML's cost model at T0 -- never a gate in VPS1.
+    string cost_model_version = 19;
+    double cost_bps = 20;
+    double expected_net_long_bps = 21;
+    double expected_net_short_bps = 22;
+}
+
+// A named measurement describing a setup (distance past a level in ATR, the
+// volume anomaly, the venue agreement...). Sorted by name on the wire.
+message SetupDescriptor {
+    string name = 1;
+    double value = 2;
+}
+
+message TradeSignalProposal {
+    string signal_proposal_id = 1;
+    string candidate_id = 2;
+    string ranking_id = 3;
+    int64 canonical_pair_id = 4;
+    int64 bitget_instrument_id = 5;
+    string strategy_id = 6;
+    string strategy_version = 7;
+    string parameter_set_id = 8;
+    Side side = 9;
+    ProposalGrade proposal_grade = 10;
+    int64 created_at_ms = 11;
+    int64 valid_until_ms = 12;
+
+    EntryType entry_type = 13;
+    double entry_price = 14;
+    double entry_lower = 15;
+    double entry_upper = 16;
+    double trigger_price = 17;
+    double max_slippage_bps = 18;
+    bool post_only_allowed = 19;
+    double expected_fill_time_p50_min = 20;
+    double expected_fill_time_p90_min = 21;
+    int64 entry_fill_timeout_ms = 22;
+
+    double stop_loss_price = 23;
+    string stop_basis = 24;
+    double stop_distance_bps = 25;
+    double stop_distance_atr = 26;
+    double take_profit_price = 27;
+    double optional_secondary_target = 28;
+    string target_basis = 29;
+    double target_distance_bps = 30;
+
+    int64 expected_holding_time_p50_ms = 31;
+    int64 expected_holding_time_p90_ms = 32;
+    int64 max_holding_time_ms = 33;
+    int64 time_stop_at_ms = 34;
+
+    // Forward-looking economics, present only when a model produced them.
+    // 35/37/38/39/40/42 held invented constants and an expected gross return
+    // that was algebraically zero for every reward/risk ratio; they are
+    // reserved rather than reused so an old consumer cannot silently rebind a
+    // tag to a different meaning.
+    reserved 35, 37, 38, 39, 40, 42;
+    reserved "p_entry_reached", "p_stop_before_target", "p_timeout",
+             "p_ambiguous", "expected_gross_return", "expected_utility";
+    // Not produced by the econ models (they estimate a fixed-horizon market
+    // outcome, not target-before-stop). Absent -- never 0 -- unless a model
+    // that computes it is serving.
+    optional double p_target_before_stop = 36;
+    double expected_net_return = 41;
+    bool edge_estimated = 79;
+    double expected_rr = 43;
+
+    reserved 44, 45;
+    reserved "ml_uncertainty", "ml_ood";
+    // |p_up - 0.5| * 2 from AltML. Conviction, not uncertainty: the old
+    // `ml_uncertainty` name carried this same number under a negative
+    // ranking weight, and `ml_ood` was never produced by anything.
+    double ml_conviction = 78;
+    bool ml_abstain = 46;
+    double strategy_confidence = 47;
+    double ensemble_agreement = 48;
+    double adaptive_score = 49;
+
+    ContextQuality quality = 50;
+    repeated ProposalWarning warnings = 51;
+    repeated string risk_flags = 52;
+    repeated string reason_codes = 53;
+    bool recommended_for_execution = 54;
+    repeated string alternative_plan_ids = 55;
+
+    int64 context_revision = 56;
+    string feature_manifest_hash = 57;
+    repeated string model_versions = 58;
+    string ranking_policy_id = 59;
+    int32 plan_version = 60;
+    ProposalState state = 61;
+    HoldingClass holding_class = 62;
+    string superseded_by_id = 63;
+
+    // --- VPS1 signal content (vps1-signal-1) ---------------------------------
+    // The market view on every served horizon (15m / 1h / 4h), always all
+    // three, MISSING where no model answered.
+    repeated MarketPrediction market_predictions = 80;
+    // The setup's measured description, sorted by name.
+    repeated SetupDescriptor setup_descriptors = 81;
+    // The prediction horizon matching the setup's own holding horizon.
+    int32 evaluation_horizon_minutes = 82;
+    string signal_semantics = 83;           // "vps1-signal-1"
+}
+
+// ------------------------------ learning loop (§35–§38) ---------------------
+
+message MarketOutcome {
+    string outcome_id = 1;
+    string signal_proposal_id = 2;
+    string candidate_id = 3;
+    int64 canonical_pair_id = 4;
+    MarketOutcomeType outcome = 5;
+    OutcomePathSource path_source = 6;
+    int64 entry_time_ms = 7;
+    int64 resolved_time_ms = 8;
+    double entry_fill_price = 9;
+    double exit_price = 10;
+    double realized_gross_return = 11;
+    double realized_net_return = 12;
+    double mfe = 13;
+    double mae = 14;
+    int64 holding_time_ms = 15;
+    bool ambiguous = 16;
+    bool is_counterfactual = 17;       // shadow / non-recommended candidate
+    int64 created_at_ms = 18;
+}
+
+message SignalExecutionFeedback {
+    string signal_proposal_id = 1;
+    bool accepted = 2;
+    repeated string rejection_reasons = 3;
+    bool order_submitted = 4;
+    string order_type = 5;
+    int64 submitted_at_ms = 6;
+    double fill_price = 7;
+    int64 fill_time_ms = 8;
+    double fill_ratio = 9;
+    double slippage_bps = 10;
+    double fees = 11;
+    double funding = 12;
+    bool position_opened = 13;
+    bool position_closed = 14;
+    string stop_result = 15;
+    string target_result = 16;
+    string time_stop_result = 17;
+    double realized_pnl = 18;
+    double mfe = 19;
+    double mae = 20;
+    repeated string execution_anomalies = 21;
+    int64 received_at_ms = 22;
+}
+
+message CounterfactualOutcome {
+    string counterfactual_id = 1;
+    string ranking_id = 2;
+    string selected_candidate_id = 3;
+    string candidate_id = 4;            // the counterfactual candidate
+    MarketOutcomeType outcome = 5;
+    double realized_net_return = 6;
+    double ranking_regret = 7;          // best_hindsight - selected
+    bool best_hindsight = 8;
+    int64 created_at_ms = 9;
+}
+
+message OutcomeAttribution {
+    string attribution_id = 1;
+    string signal_proposal_id = 2;
+    double strategy_attribution = 3;
+    double ranking_attribution = 4;
+    double geometry_attribution = 5;
+    double ml_attribution = 6;
+    double execution_attribution = 7;
+    double cost_attribution = 8;
+    double regime_attribution = 9;
+    string dominant_factor = 10;
+    int64 created_at_ms = 11;
+}
+
+// ------------------------------ adaptive state (§16–§18, §39, §40) ----------
+
+message StrategyPosterior {
+    string strategy_id = 1;
+    string strategy_version = 2;
+    string parameter_set_id = 3;
+    string regime = 4;
+    string symbol_group = 5;
+    int64 canonical_pair_id = 6;       // 0 for aggregate tiers
+    Side side = 7;
+    HoldingClass holding_class = 8;
+    double strategy_prior = 9;
+    double posterior_mean_edge = 10;
+    double posterior_uncertainty = 11;
+    double effective_sample_size = 12;
+    double shrinkage_factor = 13;
+    double time_decay_state = 14;
+    double adaptive_weight = 15;
+    int64 sample_count = 16;
+    int64 updated_at_ms = 17;
+}
+
+message StrategyDrift {
+    string strategy_id = 1;
+    string strategy_version = 2;
+    DriftStatus status = 3;
+    double candidate_frequency_drift = 4;
+    double score_distribution_drift = 5;
+    double outcome_drift = 6;
+    double fill_time_drift = 7;
+    double holding_time_drift = 8;
+    double mfe_mae_drift = 9;
+    double regime_performance_drift = 10;
+    double symbol_performance_drift = 11;
+    repeated string reasons = 12;
+    int64 computed_at_ms = 13;
+}
+
+message ParameterBound {
+    string name = 1;
+    string type = 2;    // double | int | bool
+    double min = 3;
+    double max = 4;
+    double step = 5;
+    double default_value = 6;
+}
+
+message ParameterSet {
+    string parameter_set_id = 1;
+    string strategy_id = 2;
+    string strategy_version = 3;
+    map<string, double> values = 4;
+    string status = 5;  // offline | walk_forward | shadow | active | rolled_back
+    string derived_from = 6;
+    int64 created_at_ms = 7;
+    int64 activated_at_ms = 8;
+}
+
+message RankingPolicy {
+    string ranking_policy_id = 1;
+    string ranking_policy_version = 2;
+    map<string, double> weights = 3;
+    string normalization_version = 4;
+    string calibration_version = 5;
+    bool is_champion = 6;
+    int64 created_at_ms = 7;
+}
+
+message LifecycleTransition {
+    string strategy_id = 1;
+    string strategy_version = 2;
+    LifecycleStatus from_status = 3;
+    LifecycleStatus to_status = 4;
+    string reason = 5;
+    int64 sample_count = 6;
+    bool rollback = 7;
+    string policy_version = 8;
+    int64 created_at_ms = 9;
+}
+
+// ------------------------------ transport envelope --------------------------
+
+message Envelope {
+    uint32 schema_version = 1;   // 1 for altstrategy.v1
+    string message_id = 2;
+    string event_type = 3;
+    int64 canonical_pair_id = 4;
+    string symbol = 5;
+    int64 produced_at_ms = 6;
+    string trace_id = 7;
+    string correlation_id = 8;
+    string source_service = 9;   // "altstrategy"
+
+    oneof payload {
+        DecisionContextRef decision_context = 20;
+        StrategyCandidate strategy_candidate = 21;
+        RankedTradeProposal ranked_proposal = 22;
+        TradePlanVariant trade_plan_variant = 23;
+        TradeSignalProposal trade_signal_proposal = 24;
+        MarketOutcome market_outcome = 25;
+        CounterfactualOutcome counterfactual_outcome = 26;
+        OutcomeAttribution outcome_attribution = 27;
+        StrategyPosterior strategy_posterior = 28;
+        StrategyDrift strategy_drift = 29;
+        LifecycleTransition lifecycle_transition = 30;
+        ParameterSet parameter_set = 31;
+        RankingPolicy ranking_policy = 32;
+        SignalExecutionFeedback execution_feedback = 33;
+    }
+}

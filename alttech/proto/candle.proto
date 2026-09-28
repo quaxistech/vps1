@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+
+message Candle {
+    Timeframe timeframe = 1;
+    int64 open_time_ms = 2;   // UTC, inclusive interval start
+    int64 close_time_ms = 3;  // UTC, exclusive interval end
+    Decimal open = 4;
+    Decimal high = 5;
+    Decimal low = 6;
+    Decimal close = 7;
+    Decimal base_volume = 8;
+    Decimal quote_volume = 9;
+    // Optional analytics; Bitget public candles do not provide them (left unset).
+    optional int64 trade_count = 10;
+    optional Decimal taker_buy_base_volume = 11;
+    optional Decimal taker_sell_base_volume = 12;
+    bool is_closed = 13;
+    CandleSource source = 14;
+    QualityStatus quality = 15;
+    int64 revision = 16;
+    // Aggregated bars only: number of source 1m candles in the window.
+    optional int64 minute_count = 17;
+}
+
+// Batched write path (bootstrap / reconcile / repair / aggregation catch-up).
+message CandleBatch {
+    repeated Candle candles = 1;
+}

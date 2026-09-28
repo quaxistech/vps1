@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "alttech/common.proto";
+import "alttech/feature.proto";
+import "alttech/analytics.proto";
+import "alttech/microstructure.proto";
+
+// Narrow consumer view of alttech.v1.Envelope. Unknown payloads remain
+// forward-compatible protobuf fields and are rejected by the inference gate.
+message Envelope {
+    uint32 schema_version = 1;
+    string message_id = 2;
+    string event_type = 3;
+    Exchange exchange = 4;
+    int64 instrument_id = 5;
+    string exchange_symbol = 6;
+    int64 exchange_timestamp_ms = 7;
+    int64 produced_at_ms = 8;
+    string trace_id = 9;
+    string source_service = 10;
+    // == instrument_id for usdt_perp pairs, which is the producer's own
+    // guarantee and the reason a cross-venue vector (keyed by canonical pair)
+    // joins the archive on the same instrument key every venue vector uses.
+    int64 canonical_pair_id = 17;
+
+    // AltTech owns input tags 20..22 and analytics tags 31..35. Tag 31 is now
+    // DECLARED rather than reserved -- it is the producer's MicrostructureVector,
+    // and declaring it is what lets this service read it. The rest stay
+    // unknown-but-preserved and must never be reused by AltML.
+    reserved 20 to 29, 32 to 35;
+    oneof payload {
+        FeatureVector feature_vector = 30;
+        // Per-venue analytics vectors (reference_lite and friends).
+        // Tag 60 is the producer's; it must not be renumbered here.
+        VenueFeatureVector venue_feature_vector = 60;
+        CrossVenueFeatureVector cross_venue_feature_vector = 61;
+        // Tag 31 is the producer's; declared, not reused.
+        MicrostructureVector microstructure_vector = 31;
+    }
+}

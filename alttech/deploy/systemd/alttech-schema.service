@@ -1,0 +1,27 @@
+[Unit]
+Description=AltTech PostgreSQL schema
+Wants=network-online.target
+After=network-online.target postgresql.service
+Before=alttech.service
+PartOf=alttech.target
+
+[Service]
+Type=oneshot
+User=alttech
+Group=alttech
+EnvironmentFile=/etc/alttech/common.env
+ExecStart=/opt/alttech/bin/alttech-schema --schema /opt/alttech/share/alttech/schema.sql
+RemainAfterExit=yes
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=alttech.target

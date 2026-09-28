@@ -1,0 +1,63 @@
+[Unit]
+Description=AltTech unified market analytics service
+PartOf=alttech.target
+Wants=network-online.target
+After=network-online.target nats-server.service postgresql.service
+# Must-stay-up service: never give up restarting after a burst of crashes.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=alttech
+Group=alttech
+EnvironmentFile=/etc/alttech/common.env
+ExecStartPre=/opt/alttech/bin/alttech-config-check --file /etc/alttech/common.yaml --kind common
+ExecStartPre=/opt/alttech/bin/alttech-config-check --file /etc/alttech/alttech.yaml --kind service
+ExecStartPre=/opt/alttech/bin/alttech-nats-setup --check
+ExecStart=/opt/alttech/bin/alttech-service --config /etc/alttech/alttech.yaml --common /etc/alttech/common.yaml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStartSec=180
+TimeoutStopSec=60
+# Liveness supervision: the daemon pings WATCHDOG=1 from its main loop. If the
+# process hangs (deadlock, wedged worker) the pings stop and systemd restarts it
+# — a watchdog timeout counts as a failure, so Restart=on-failure applies.
+# 120 s, pinged at 60 s. The modules themselves lease liveness for 180 s or
+# more (a regime cycle plus a progress lease), so a 30 s process watchdog was
+# inconsistent with the service's own liveness model: it could not detect
+# anything the module beacons did not already cover, while leaving no margin at
+# all for a scheduling stall. On a host under memory and IO pressure that
+# produced 29 kills in a day of a process that was working correctly — and each
+# kill cost a full RECOMPUTE bootstrap on restart.
+WatchdogSec=120
+LimitNOFILE=16384
+TasksMax=128
+MemoryMax=1536M
+Nice=5
+UMask=0027
+LimitCORE=0
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+
+[Install]
+WantedBy=alttech.target

@@ -1,0 +1,153 @@
+# AltTech analytics service configuration.
+# Production copy: /etc/alttech/alttech.yaml (root:alttech, 0640).
+service: alttech
+
+# Shared by all modules. The minimum is feature.workers + 4 so the feature
+# workers, the feature consumer and the other four modules cannot starve one
+# another.
+postgres_pool_size: 8
+
+# Server-side bound on every pooled query (ms). A stuck query then surfaces as a
+# retryable error instead of wedging a worker thread. Must exceed the slowest
+# legitimate backfill chunk read. 0 disables. Range: 0 or [1000, 600000].
+postgres_statement_timeout_ms: 120000
+
+# --- venue identity --------------------------------------------------------
+# Bitget is the single primary trading venue; the other three are reference
+# venues that provide the cross-venue context. Spot markets are out of scope.
+# The pair universe is not configured here: it is read from AltSpotter's global
+# observation universe, the intersection of all four venues.
+primary_exchange: bitget
+reference_exchanges:
+  - binance_usdm
+  - bybit
+  - okx
+
+# --- cross-venue module ----------------------------------------------------
+# The macro / cross-asset block, derived from AltMacro's raw external series
+# through the read-only altmacro_ref foreign schema.
+#
+# It publishes measured quantities only -- returns, realized volatility, the
+# spreads between the three CNY observations, rate-curve constructions. Nothing
+# here asserts a direction; whether any of it predicts a crypto move is for the
+# model to establish.
+macro:
+  # Tracks AltMacro's coverage, which moves. No default: a built-in date would
+  # be right today and silently wrong later, and the block would then start
+  # mid-history with no one the wiser.
+  history_start: "" # Required: set to AltMacro's configured coverage start.
+  # The block is recomputed over a trailing window rather than incrementally: a
+  # daily figure published late changes minutes already written, and recomputing
+  # is cheaper than tracking which ones. Once a minute, because each new minute
+  # is also published to AltML, whose freshness bound for this source is five
+  # minutes.
+  cycle_interval_sec: 60
+  live_lookback_minutes: 240
+
+cross_venue:
+  enabled: true
+  cycle_interval_sec: 30
+  lookback_min: 180
+  # Lead-lag is estimated over this many 1m samples, searching lags up to
+  # lead_lag_max_lag minutes in each direction.
+  lead_lag_window: 30
+  lead_lag_max_lag: 5
+  # A consensus zone needs at least this many venues; one no venue has confirmed
+  # for zone_stale_after_sec is expired.
+  min_consensus_venues: 2
+  zone_stale_after_sec: 1800
+  alignment:
+    # How long to wait past a bar's close for a slow venue.
+    bar_watermark_timeout_ms: 4000
+    # How far behind its own market data a venue may be and still count. It is
+    # measured against the 1m grid these analytics run on, so this is three bar
+    # intervals, not a sub-second bound.
+    max_venue_data_age_ms: 180000
+    # Maximum spread between the participating venues' clock offsets. Above this
+    # the venues are not describing the same instant. Retune from the skew
+    # actually observed: alttech-analytics alignment-inspect reports it.
+    max_cross_venue_skew_ms: 2500
+  weighting:
+    # quality_weighted_median | quality_weighted_mean | trimmed_weighted_mean.
+    # The median is the default because it is robust to a single venue printing
+    # an outlier price.
+    method: quality_weighted_median
+
+# --- storage budget --------------------------------------------------------
+# The soft limit applies to the AltTech schema. The hard limit applies to the
+# shared database, including AltSpotter market data. Maintenance uses the
+# configured ratios and each table's retention policy to manage derived data.
+# Values below are example deployment limits; size them for the host.
+storage:
+  total_database_hard_limit_bytes: 3221225472
+  analytics_soft_limit_bytes: 2900000000
+  analytics_warning_ratio: 0.80
+  analytics_cleanup_ratio: 0.90
+  analytics_critical_ratio: 0.95
+
+modules:
+  feature:
+    # AltSpotter owns this input stream; AltTech owns only its durable consumer.
+    bar_stream: ${ALTTECH_NATS_INPUT_STREAM}
+    bar_consumer: ${ALTTECH_NATS_DURABLE}
+    workers: 1
+    backfill_chunk: 5000
+    write_batch: 400
+    publish_core_vectors: true
+    # Every timeframe AltSpotter aggregates. Long period indicators may remain
+    # invalid on higher timeframes until enough contiguous bars are available.
+    timeframes: "1m,5m,15m,30m,1h,4h,1d"
+    # How far back the replay reaches, for every timeframe. This is a storage
+    # decision: analytics can only be written where a partition exists, and
+    # partitions only cover the retention window, so it must stay inside it.
+    # Two days is the trading horizon, so a restart immediately restores
+    # everything a live decision can depend on.
+    backfill_days: 2
+    task_retry_backoff_min_ms: 1000
+    task_retry_backoff_max_ms: 30000
+    # Reference-venue sweep (Binance, Bybit, OKX) driven by this module.
+    cycle_interval_sec: 30
+    venue_lookback_min: 180
+    venue_window_len: 220
+
+  microstructure:
+    # Trade windows from Core NATS, with order-book snapshots read from the
+    # shared PostgreSQL database populated by AltSpotter.
+    tick_interval_ms: 500
+    book_poll_page_size: 50000
+    book_poll_max_pages_per_tick: 4
+    book_poll_overlap_ms: 2000
+    store_batch_size: 2000
+    # Every computed window (1s, 5s, 15s, 30s, 1m) is published live; only these
+    # are persisted. Sub-15s vectors dominate the storage budget and are only
+    # actionable in real time, so they stay live-only by default.
+    persist_windows: "15s,30s,1m"
+    cycle_interval_sec: 30
+    venue_lookback_min: 180
+
+  structure:
+    cycle_interval_sec: 60
+    venue_lookback_min: 180
+    venue_window_len: 220
+
+  regime:
+    cycle_interval_sec: 30
+    # Historical regime backfill over the retained feature history at start-up.
+    # 0 disables it and the module classifies only from the current bar onwards.
+    backfill_days: 0
+    venue_lookback_min: 180
+    venue_window_len: 220
+    # Decision boundaries between regimes, in normalized axis units. The
+    # defaults are the conventional readings: ADX above 25 is an established
+    # trend (Wilder), the volatility axis is an empirical percentile of
+    # Bollinger bandwidth over the trailing 14 days, the volume axis is a
+    # z-score mapped to [0,1] with +/-3 sigma saturation, and the efficiency
+    # ratio is Kaufman's (0 noise, 1 pure trend).
+    thresholds:
+      adx_trending: 25.0
+      low_liquidity_volume: 0.15
+      chaotic_efficiency: 0.12
+      chaotic_volatility: 0.85
+      expansion_volatility: 0.90
+      breakout_volume_z: 1.5
+      compression_volatility: 0.12

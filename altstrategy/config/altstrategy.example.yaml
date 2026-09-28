@@ -1,0 +1,222 @@
+# altstrategy-service — decision engine configuration.
+# Production copy: /etc/altstrategy/altstrategy.yaml (root:altstrategy, 0640).
+#
+# One binary, one process, one systemd unit. The engine is EVENT-DRIVEN: it
+# reacts to AltTech analytics / AltML forecasts / universe events, assembles a
+# DecisionContext and runs the full pipeline; the internal maintenance scheduler
+# runs periodic jobs (outcome maturation, posteriors, drift, calibration,
+# snapshot export, retention).
+service: altstrategy
+
+# Shared PostgreSQL pool (each transaction leases one connection exclusively).
+postgres_pool_size: 12
+
+# --- inputs (NATS subjects consumed; §46/§4) ---------------------------------
+inputs:
+  alttech_subjects: ["alttech.feature.>", "alttech.regime.>", "alttech.structure.>",
+                     "alttech.quality.>", "alttech.microfeature.>"]
+  prediction_subjects: ["prediction.>"]
+  universe_subjects: ["evt.universe.>"]
+
+# --- context assembly (§7) ---------------------------------------------------
+# AltTech ships compact ORDERED feature vectors; these name lists decode index i
+# -> values[i]. They MUST be the exact ordered member list of the AltTech
+# feature set that produced the vector — same names, same order, same length.
+#
+# This is a hard contract: the names, order and length must match the producer's
+# feature-set version.
+context:
+  context_ttl_sec: 300
+  max_component_age_sec: 1200
+
+  # A microstructure window older than this is not the market a plan would be
+  # placed into; spread and depth fall back to conservative defaults instead.
+  max_microstructure_age_sec: 120
+
+  # The ONE microstructure window admitted. AltTech publishes the same 26
+  # columns on 1s/5s/15s/30s/1m; mixing them is a units error, not a freshness
+  # choice, because trade_intensity, signed_volume and cvd_delta are per-window
+  # quantities. Use one fixed window so features in a context share the same
+  # aggregation interval.
+  microstructure_window: "1m"
+
+  # The ONE timeframe decisions are made on. AltTech publishes a feature vector
+  # per timeframe (1m … 1d) on a single subject, so without this every indicator
+  # in a context would come from whichever bar length arrived last.
+  #
+  # 15m is the intraday default: long enough that ADX(14) and the 20-bar
+  # channels describe a real move rather than noise, short enough for the 48h
+  # time stop. It must be a timeframe AltTech actually reaches VALID on — that
+  # needs at least 250 contiguous bars of history for the warmup, so 4h and 1d
+  # require far more retained history than an intraday deployment keeps.
+  decision_timeframe_minutes: 15
+  # Higher grids carried as CONTEXT alongside the execution grid. Each enters a
+  # decision only when its own bar has CLOSED at or before T0, and only while it
+  # is within max_context_age_sec of that close. A grid with no valid
+  # observation is absent -- never filled in from the execution timeframe.
+  context_timeframes_minutes: [30, 60, 240, 1440]
+  # Higher grids are legitimately older than the execution one: a 4h bar is up
+  # to four hours old the moment it closes. Measured from the CLOSE.
+  max_context_age_sec: 21600
+
+  # --- Bitget per-venue indicators — AltTech's `talib-core` set --------------
+  # The FULL TA-Lib enumeration (995 members), ordered by the engine, not a
+  # hand-picked subset: position 0 is ADD_outReal and ATR_14_outReal sits at 461.
+  # `positions` is therefore sparse — only what this engine reads — and safe
+  # because the pinned schema_hash fixes the ordering those indices belong to.
+  #
+  # Re-derive after any AltTech feature-set change:
+  #   psql -d alttech -tAc "SELECT position, output_name FROM alttech.feature_set_members
+  #                         WHERE feature_set_version_id = 1 ORDER BY position"
+  bitget_feature_set:
+    name: talib-core
+    version: 1
+    schema_hash: "934cb08abe0c342ccb4b14ceb9dc3a3a8a7d001a1f888a26dc940208989188ba"
+    value_count: 995
+    positions:
+      donchian_high_20: 9      # MAX_HIGH_20_outReal
+      donchian_low_20: 37      # MIN_LOW_20_outReal
+      bb_upper_20: 197         # BBANDS_20_SMA_outRealUpperBand
+      bb_middle_20: 198        # BBANDS_20_SMA_outRealMiddleBand
+      bb_lower_20: 199         # BBANDS_20_SMA_outRealLowerBand
+      ema_20: 315              # EMA_20_outReal
+      ema_50: 316              # EMA_50_outReal
+      ema_200: 318             # EMA_200_outReal
+      atr_14: 461              # ATR_14_outReal   — price units, sizes every stop
+      atr_50: 463              # ATR_50_outReal   — atr_expansion denominator
+      adx_14: 476              # ADX_14_outReal
+      mom_5: 601               # MOM_5_outReal
+      mom_14: 603              # MOM_14_outReal
+      roc_5: 631               # ROC_5_outReal
+      roc_14: 633              # ROC_14_outReal
+      roc_20: 634              # ROC_20_outReal
+      rsi_14: 661              # RSI_14_outReal
+      stddev_20: 962           # STDDEV_20_outReal
+
+  # --- Cross-venue consensus — AltTech's frozen `cross_venue_core` set -------
+  # Only 30 members, so the whole ordering is listed. The producer's identity
+  # string for this set is the joined member list itself, hence the `xv:` prefix.
+  cross_venue_feature_set:
+    name: cross_venue_core
+    version: 2
+    value_count: 37
+    positions:
+      consensus_mid_price: 0
+      consensus_mark_price: 1
+      consensus_index_price: 2
+      dislocation_bps: 7             # max_venue_price_deviation_bps
+      # Bitget's own signed deviation from the consensus. venue_dislocation_
+      # convergence computed this as (last_price - consensus_mid) / consensus,
+      # but last_price IS the consensus mid, so the gap was identically zero and
+      # the strategy could never fire.
+      bitget_mid_deviation_bps: 3
+      venue_price_dispersion_bps: 8
+      # The DIRECTION of the consensus (1m log return). The agreement below is
+      # an unsigned share; the engine signs it with this.
+      consensus_momentum_score: 10
+      momentum_agreement: 11         # venue_momentum_agreement (share, 0..1)
+      bitget_momentum_divergence: 12
+      consensus_flow: 13             # cross_venue_signed_volume
+      breakout_agreement: 14         # orderflow_agreement
+      funding_rate_8h: 16            # consensus_funding_8h
+      funding_divergence: 18         # bitget_funding_deviation
+      oi_growth: 19                  # consensus_oi_change
+      liquidity_rank: 23             # bitget_liquidity_rank
+      # Signed on [-5, +5]: positive means Bitget LEADS the consensus, negative
+      # that it follows. Named after the producer's member, because reading it
+      # as a [0,1] "confidence" is what made cross_venue_lead_lag_follow demand
+      # that Bitget both lead and lag at once.
+      bitget_lead_score: 27
+      bitget_lag_ms: 28              # bitget_lag_to_consensus_ms
+      cross_venue_confidence: 29
+      # v2 — technical agreement across the four venues. Each venue computes its
+      # indicators from its own candles, so agreement here is confirmation, not
+      # the same number counted four times.
+      consensus_rsi_14: 30
+      rsi_dispersion: 31             # low = the venues agree on the reading
+      bitget_rsi_deviation: 32
+      consensus_realized_vol: 33
+      volatility_agreement: 34       # 1 = identical realized vol, 0 = wildly apart
+      trend_alignment_agreement: 35  # mean EMA stacking, -1..+1
+      bitget_trend_divergence: 36
+
+  # --- Bitget live microstructure — AltTech's `bitget_micro` set -------------
+  # The ONLY source of spread, book depth and trade flow: none of these are
+  # TA-Lib outputs and none appear in `talib-core`.
+  microstructure_feature_set:
+    name: bitget_micro
+    version: 1
+    schema_hash: "e6a391bcc3e3f1607114d032a334d7cf22c3b2f94f3e74030f84a03a3c2098f3"
+    value_count: 26
+    positions:
+      trade_intensity: 1
+      # The window's traded volume (buy + sell) weights the session VWAP.
+      aggressive_buy_volume: 2
+      aggressive_sell_volume: 3
+      trade_imbalance: 4
+      signed_volume: 5
+      cvd_delta: 6                   # delta
+      cvd: 7
+      vwap: 14
+      turnover_acceleration: 16      # volume_acceleration
+      spread_bps: 18                 # book_spread_bps
+      book_imbalance: 19
+      book_microprice_dev: 20
+      book_bid_depth: 21
+      book_ask_depth: 22
+
+# --- strategies (§8) — the sixteen-strategy catalogue is compiled in; lifecycle
+#     seeds live in altstrategy.strategy_lifecycle and are loaded at startup ----
+strategies:
+  min_candidate_rr: 0.0        # emit any technically valid geometry (never hide weak)
+  candidate_ttl_sec: 900
+  # Model-only ("ml_state") candidates are disabled. Market-setup candidates
+  # carry the model's view of the state as context.
+  state_candidates: false
+
+# --- ensemble + adaptive allocator (§10) -------------------------------------
+adaptive_allocator:
+  prior_strength: 20.0         # Bayesian shrinkage pseudo-count (k)
+  edge_scale: 0.004
+  weight_min: 0.25
+  weight_max: 2.5
+  half_life_days: 30.0
+
+# --- ranking (§10, §19) ------------------------------------------------------
+# Intentionally NOT configurable. The champion/challenger policy identities
+# (`champion_v1` / `challenger_v1`) and the close-gap threshold are compiled in
+# (src/engine/ranking.cpp) and are written into strategy_rankings as identity.
+
+# --- trade plan (§11, §14, §15) ----------------------------------------------
+trade_plan:
+  min_stop_bps: 8.0
+  max_entry_timeout_sec: 7200
+  default_max_slippage_bps: 6.0
+  max_holding_hours: 48        # hard invariant, never exceeded
+
+# --- market outcomes (§18, §19) — self-computed from AltSpotter history --------
+outcomes:
+  bitget_exchange_id: 1
+  candles_table: market_candles_1m
+  trades_table: market_trades_raw
+  prefer_raw_trades: true
+
+# --- execution feedback (§21) — OPTIONAL; VPS1 never blocks on it -------------
+execution_feedback:
+  subject: signal.execution_feedback.>
+
+# --- drift / calibration / lifecycle (§35, §36, §37) -------------------------
+# The drift scan runs on the maintenance tick and has no settings of its own.
+calibration:
+  min_samples: 30
+lifecycle:
+  min_samples: 100
+  cooldown_hours: 24
+
+# --- training snapshots (§26–§31) --------------------------------------------
+training_snapshots:
+  export_root: /var/lib/altstrategy/exports/signal-quality
+  format: csv                  # 'parquet' when built with libarrow on the target
+
+logging:
+  level: info

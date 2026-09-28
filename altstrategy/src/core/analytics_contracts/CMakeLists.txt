@@ -1,0 +1,2 @@
+add_library(altstrategy_analytics_contracts INTERFACE)
+target_include_directories(altstrategy_analytics_contracts INTERFACE include)

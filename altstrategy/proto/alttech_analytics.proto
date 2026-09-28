@@ -1,0 +1,533 @@
+syntax = "proto3";
+
+// alttech.v1 — VENDORED, self-contained subset of the AltTech four-venue
+// analytics contract that AltStrategy's context_assembler consumes (source of
+// truth: alttech/proto/{common,analytics,regime,structure,marketdata,system}.proto).
+//
+// Only the messages + envelope payload tags AltStrategy reads are declared here;
+// field numbers are IDENTICAL to upstream so the package-agnostic wire form is
+// byte-compatible. Payload tags AltStrategy does not consume (raw trades and
+// candles) are intentionally omitted from the oneof — protobuf treats them as
+// ignored unknown fields on the wire. Field 31 (primary-venue
+// MicrostructureVector) IS consumed: spread, book depth, trade imbalance and
+// trade intensity exist only there, never in the TA-Lib feature set. Field 30
+// (FeatureVector) IS included: AltTech currently publishes Bitget's full
+// "core" feature set on this tag (not the newer per-venue VenueFeatureVector),
+// so it is required, not legacy.
+package alttech.v1;
+
+// ------------------------------ shared enums --------------------------------
+
+enum Exchange {
+    EXCHANGE_UNSPECIFIED = 0;
+    EXCHANGE_BITGET = 1;
+    EXCHANGE_BINANCE = 2;
+    EXCHANGE_OKX = 3;
+    EXCHANGE_BYBIT = 4;
+}
+
+enum MarketType {
+    MARKET_TYPE_UNSPECIFIED = 0;
+    MARKET_TYPE_USDT_PERP = 1;
+}
+
+enum QualityState {
+    QUALITY_STATE_UNSPECIFIED = 0;
+    QUALITY_STATE_VALID = 1;
+    QUALITY_STATE_DEGRADED = 2;
+    QUALITY_STATE_STALE = 3;
+    QUALITY_STATE_DESYNCED = 4;
+    QUALITY_STATE_NOT_AVAILABLE = 5;
+    QUALITY_STATE_NOT_APPLICABLE = 6;
+}
+
+enum AnalyticsScope {
+    ANALYTICS_SCOPE_UNSPECIFIED = 0;
+    ANALYTICS_SCOPE_VENUE = 1;
+    ANALYTICS_SCOPE_CROSS_VENUE = 2;
+    ANALYTICS_SCOPE_BITGET_PROJECTED = 3;
+}
+
+enum CrossVenueQualityStatus {
+    CROSS_VENUE_QUALITY_UNSPECIFIED = 0;
+    CROSS_VENUE_QUALITY_STRICT_VALID = 1;
+    CROSS_VENUE_QUALITY_DEGRADED_3_OF_4 = 2;
+    CROSS_VENUE_QUALITY_DEGRADED_2_OF_4 = 3;
+    CROSS_VENUE_QUALITY_INVALID = 4;
+}
+
+enum AlignmentStatus {
+    ALIGNMENT_STATUS_UNSPECIFIED = 0;
+    ALIGNMENT_STATUS_WAITING = 1;
+    ALIGNMENT_STATUS_STRICT_ALIGNED = 2;
+    ALIGNMENT_STATUS_DEGRADED_ALIGNED = 3;
+    ALIGNMENT_STATUS_LATE_REVISION = 4;
+    ALIGNMENT_STATUS_INVALID = 5;
+}
+
+enum Timeframe {
+    TIMEFRAME_UNSPECIFIED = 0;
+    TF_1M = 1;
+    TF_5M = 5;
+    TF_15M = 15;
+    TF_30M = 30;
+    TF_1H = 60;
+    TF_4H = 240;
+    TF_1D = 1440;
+}
+
+enum MicrostructureVectorStatus {
+    MICROSTRUCTURE_STATUS_UNSPECIFIED = 0;
+    MICROSTRUCTURE_STATUS_VALID = 1;
+    MICROSTRUCTURE_STATUS_WARMING = 2;
+    MICROSTRUCTURE_STATUS_NOT_AVAILABLE = 3;
+}
+
+// Primary-venue (Bitget) trade + order-book microstructure for one tumbling
+// window — AltTech's `bitget_micro` set. This is where the live spread, book
+// depth, trade imbalance and trade intensity actually come from; they are not
+// TA-Lib outputs and do not appear in the `talib-core` vector at all.
+// canonical_pair_id is carried by the Envelope, as it is for FeatureVector.
+message MicrostructureVector {
+    string window_label = 1;   // 1s | 5s | 15s | 30s | 1m
+    int64 window_start_ms = 2;
+    string feature_set_name = 3;
+    int32 feature_set_version = 4;
+    string schema_hash = 5;
+    string engine_version = 6;
+    repeated float values = 7 [packed = true];
+    bytes validity_bitmap = 8;
+    MicrostructureVectorStatus status = 9;
+    int64 computed_at_ms = 10;
+}
+
+enum AnalyticsVectorStatus {
+    ANALYTICS_VECTOR_STATUS_UNSPECIFIED = 0;
+    ANALYTICS_VECTOR_STATUS_NOT_READY = 1;
+    ANALYTICS_VECTOR_STATUS_WARMING = 2;
+    ANALYTICS_VECTOR_STATUS_VALID = 3;
+    ANALYTICS_VECTOR_STATUS_INCOMPLETE_INPUT = 4;
+    ANALYTICS_VECTOR_STATUS_REVISED = 5;
+    ANALYTICS_VECTOR_STATUS_INVALID = 6;
+}
+
+enum FeatureVectorStatus {
+    FEATURE_STATUS_UNSPECIFIED = 0;
+    FEATURE_STATUS_NOT_READY = 1;
+    FEATURE_STATUS_WARMING = 2;
+    FEATURE_STATUS_VALID = 3;
+    FEATURE_STATUS_INCOMPLETE_INPUT = 4;
+    FEATURE_STATUS_REVISED = 5;
+    FEATURE_STATUS_INVALID = 6;
+}
+
+enum ZoneLifecycle {
+    ZONE_LIFECYCLE_UNSPECIFIED = 0;
+    ZONE_LIFECYCLE_CANDIDATE = 1;
+    ZONE_LIFECYCLE_ACTIVE = 2;
+    ZONE_LIFECYCLE_TESTED = 3;
+    ZONE_LIFECYCLE_WEAKENED = 4;
+    ZONE_LIFECYCLE_BROKEN = 5;
+    ZONE_LIFECYCLE_FLIPPED = 6;
+    ZONE_LIFECYCLE_EXPIRED = 7;
+}
+
+enum GlobalRegime {
+    GLOBAL_REGIME_UNSPECIFIED = 0;
+    GLOBAL_REGIME_UNDEFINED = 1;
+    GLOBAL_REGIME_LOW_LIQUIDITY = 2;
+    GLOBAL_REGIME_CHAOTIC = 3;
+    GLOBAL_REGIME_TREND_UP = 4;
+    GLOBAL_REGIME_TREND_DOWN = 5;
+    GLOBAL_REGIME_BREAKOUT = 6;
+    GLOBAL_REGIME_VOLATILITY_EXPANSION = 7;
+    GLOBAL_REGIME_VOLATILITY_COMPRESSION = 8;
+    GLOBAL_REGIME_RANGE = 9;
+}
+
+enum MarketRegime {
+    MARKET_REGIME_UNSPECIFIED = 0;
+    MARKET_REGIME_UNDEFINED = 1;
+    MARKET_REGIME_LOW_LIQUIDITY = 2;
+    MARKET_REGIME_CHAOTIC = 3;
+    MARKET_REGIME_TREND_UP = 4;
+    MARKET_REGIME_TREND_DOWN = 5;
+    MARKET_REGIME_BREAKOUT = 6;
+    MARKET_REGIME_VOLATILITY_EXPANSION = 7;
+    MARKET_REGIME_VOLATILITY_COMPRESSION = 8;
+    MARKET_REGIME_RANGE = 9;
+}
+
+enum StructureEventType {
+    STRUCTURE_EVENT_UNSPECIFIED = 0;
+    STRUCTURE_EVENT_SNAPSHOT = 1;
+    STRUCTURE_EVENT_ZONE_BROKEN = 2;
+    STRUCTURE_EVENT_ZONE_TESTED = 3;
+    STRUCTURE_EVENT_ZONE_FLIPPED = 4;
+    STRUCTURE_EVENT_ZONE_EXPIRED = 5;
+}
+
+message Decimal {
+    sint64 mantissa = 1;
+    int32 scale = 2;
+}
+
+// ------------------------------ universe (evt.universe.>) --------------------
+
+message UniverseVenueState {
+    Exchange exchange = 1;
+    bool listed = 2;
+    bool active = 3;
+    string exchange_symbol = 4;
+    string detail = 5;
+}
+
+message UniversePairState {
+    int64 canonical_pair_id = 1;
+    string base_asset = 2;
+    string quote_asset = 3;
+    bool eligible = 4;
+    string status = 5;
+    string reason = 6;
+    repeated UniverseVenueState venues = 7;
+}
+
+message GlobalUniverseSnapshot {
+    int64 computed_at_ms = 1;
+    repeated UniversePairState pairs = 2;
+}
+
+message GlobalUniverseChange {
+    UniversePairState pair = 1;
+    string previous_status = 2;
+}
+
+// ------------------------------ regime / structure --------------------------
+
+message RegimeAxes {
+    double trend_strength = 1;
+    double volatility_regime = 2;
+    double volume_regime = 3;
+    optional double momentum_persistence = 4;
+    double liquidity_quality = 5;
+    double data_quality = 6;
+    int64 source_bar_revision = 7;
+    string source_projection_updated_at = 8;
+    string source_feature_computed_at = 9;
+}
+
+message RegimeSnapshot {
+    Timeframe timeframe = 1;
+    int64 bar_open_time_ms = 2;
+    MarketRegime regime = 3;
+    optional MarketRegime previous_regime = 4;
+    double confidence = 5;
+    RegimeAxes axes = 6;
+    string algorithm_version = 7;
+}
+
+message RegimeSummary {
+    Timeframe timeframe = 1;
+    MarketRegime regime = 2;
+    double confidence = 3;
+    RegimeAxes axes = 4;
+    int64 bar_open_time_ms = 5;
+}
+
+message CombinedRegime {
+    MarketRegime primary_regime = 1;
+    repeated RegimeSummary timeframes = 2;
+    string algorithm_version = 3;
+}
+
+message StructureEvent {
+    Timeframe timeframe = 1;
+    int64 bar_open_time_ms = 2;
+    StructureEventType type = 3;
+    string algorithm_version = 4;
+    optional int32 active_zone_count = 5;
+    string zone_kind = 6;
+    string resulting_zone_kind = 7;
+    optional double center_price = 8;
+}
+
+// ------------------------------ analytics vectors ---------------------------
+
+// Bitget's primary/full-fidelity "core" feature vector (field 30 upstream).
+// Identity (exchange/canonical_pair_id) comes from the enclosing Envelope, not
+// from this message.
+message FeatureVector {
+    Timeframe timeframe = 1;
+    int64 bar_open_time_ms = 2;
+    int64 bar_revision = 3;
+    string feature_set_name = 4;
+    int32 feature_set_version = 5;
+    string schema_hash = 6;
+    string engine_version = 7;
+    repeated float values = 8 [packed = true];
+    bytes validity_bitmap = 9;
+    FeatureVectorStatus status = 10;
+    int64 computed_at_ms = 11;
+}
+
+message VenueContribution {
+    Exchange exchange = 1;
+    double weight = 2;
+    double value = 3;
+    bool included = 4;
+    double freshness_ms = 5;
+    double relative_spread = 6;
+    double depth_usdt = 7;
+    QualityState quality = 8;
+    string exclude_reason = 9;
+}
+
+message VenueFeatureVector {
+    AnalyticsScope scope = 1;
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    Timeframe timeframe = 5;
+    int64 bar_open_time_ms = 6;
+    int64 bar_revision = 7;
+    string profile = 8;
+    string feature_set_name = 9;
+    int32 feature_set_version = 10;
+    string schema_hash = 11;
+    string engine_version = 12;
+    repeated float values = 13 [packed = true];
+    bytes validity_bitmap = 14;
+    AnalyticsVectorStatus status = 15;
+    QualityState venue_quality = 16;
+    int64 analytics_revision = 17;
+    int64 computed_at_ms = 18;
+}
+
+message CrossVenueFeatureVector {
+    AnalyticsScope scope = 1;
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    int64 bar_open_time_ms = 4;
+    string feature_set_name = 5;
+    int32 feature_set_version = 6;
+    string schema_hash = 7;
+    string method_version = 8;
+    repeated float values = 9 [packed = true];
+    bytes validity_bitmap = 10;
+    AnalyticsVectorStatus status = 11;
+    CrossVenueQualityStatus quality_status = 12;
+    uint32 venue_mask = 13;
+    uint32 missing_venue_mask = 14;
+    uint32 stale_venue_mask = 15;
+    uint32 desynced_venue_mask = 16;
+    double confidence = 17;
+    repeated VenueContribution contributions = 18;
+    int64 analytics_revision = 19;
+    int64 computed_at_ms = 20;
+}
+
+message VenueMicrostructureVector {
+    AnalyticsScope scope = 1;
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    string window_label = 5;
+    int64 window_start_ms = 6;
+    string profile = 7;
+    string feature_set_name = 8;
+    int32 feature_set_version = 9;
+    string schema_hash = 10;
+    string engine_version = 11;
+    repeated float values = 12 [packed = true];
+    bytes validity_bitmap = 13;
+    AnalyticsVectorStatus status = 14;
+    QualityState venue_quality = 15;
+    int64 computed_at_ms = 16;
+}
+
+message CrossVenueMicrostructureVector {
+    AnalyticsScope scope = 1;
+    int64 canonical_pair_id = 2;
+    string window_label = 3;
+    int64 window_start_ms = 4;
+    string feature_set_name = 5;
+    int32 feature_set_version = 6;
+    string schema_hash = 7;
+    string method_version = 8;
+    repeated float values = 9 [packed = true];
+    bytes validity_bitmap = 10;
+    AnalyticsVectorStatus status = 11;
+    CrossVenueQualityStatus quality_status = 12;
+    uint32 venue_mask = 13;
+    int32 dominant_flow_venue = 14;
+    int64 computed_at_ms = 15;
+}
+
+message VenueStructureZone {
+    AnalyticsScope scope = 1;
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    Timeframe timeframe = 5;
+    string kind = 6;
+    double lower_price = 7;
+    double center_price = 8;
+    double upper_price = 9;
+    double strength = 10;
+    double confidence = 11;
+    ZoneLifecycle lifecycle = 12;
+    string algorithm_version = 13;
+    int64 zone_id = 14;
+    int64 updated_at_ms = 15;
+}
+
+message ConsensusStructureZone {
+    AnalyticsScope scope = 1;
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    double normalized_center = 4;
+    double normalized_width = 5;
+    uint32 supporting_venue_mask = 6;
+    int32 supporting_venue_count = 7;
+    double venue_confluence_score = 8;
+    double strength = 9;
+    double confidence = 10;
+    ZoneLifecycle lifecycle = 11;
+    CrossVenueQualityStatus quality_status = 12;
+    string algorithm_version = 13;
+    int64 zone_id = 14;
+    int64 updated_at_ms = 15;
+}
+
+message BitgetProjectedZone {
+    AnalyticsScope scope = 1;
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    int64 source_consensus_zone_id = 4;
+    double bitget_basis_adjustment = 5;
+    double projected_lower = 6;
+    double projected_center = 7;
+    double projected_upper = 8;
+    double projection_quality = 9;
+    int64 projection_time_ms = 10;
+    string algorithm_version = 11;
+}
+
+message VenueMarketRegime {
+    AnalyticsScope scope = 1;
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    Timeframe timeframe = 5;
+    int64 bar_open_time_ms = 6;
+    GlobalRegime regime = 7;
+    double confidence = 8;
+    double trend_strength = 9;
+    double volatility_regime = 10;
+    double liquidity_quality = 11;
+    double data_quality = 12;
+    string algorithm_version = 13;
+}
+
+message GlobalMarketRegime {
+    AnalyticsScope scope = 1;
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    int64 bar_open_time_ms = 4;
+    GlobalRegime primary_regime = 5;
+    double regime_confidence = 6;
+    double venue_agreement = 7;
+    double venue_dispersion = 8;
+    uint32 supporting_venue_mask = 9;
+    bool bitget_regime_divergence = 10;
+    double trend_consensus = 11;
+    double volatility_consensus = 12;
+    double liquidity_consensus = 13;
+    CrossVenueQualityStatus quality_status = 14;
+    string algorithm_version = 15;
+}
+
+message CrossVenueQuality {
+    int64 canonical_pair_id = 1;
+    Timeframe timeframe = 2;
+    int64 bar_open_time_ms = 3;
+    CrossVenueQualityStatus quality_status = 4;
+    uint32 venue_mask = 5;
+    uint32 missing_venue_mask = 6;
+    uint32 stale_venue_mask = 7;
+    uint32 desynced_venue_mask = 8;
+    double confidence = 9;
+    repeated string quality_reasons = 10;
+    int64 observed_at_ms = 11;
+}
+
+message VenueAlignment {
+    int64 canonical_pair_id = 1;
+    Timeframe timeframe = 2;
+    int64 canonical_open_time_ms = 3;
+    int64 canonical_close_time_ms = 4;
+    int64 watermark_time_ms = 5;
+    uint32 venue_mask = 6;
+    uint32 missing_venue_mask = 7;
+    uint32 late_venue_mask = 8;
+    uint32 revised_venue_mask = 9;
+    AlignmentStatus alignment_status = 10;
+    double max_cross_venue_skew_ms = 11;
+    int64 observed_at_ms = 12;
+}
+
+message CrossVenueRevision {
+    int64 canonical_pair_id = 1;
+    Timeframe timeframe = 2;
+    int64 bar_open_time_ms = 3;
+    int64 previous_revision = 4;
+    int64 new_revision = 5;
+    uint32 revised_venue_mask = 6;
+    string reason = 7;
+    int64 recomputed_at_ms = 8;
+}
+
+// ------------------------------ transport envelope --------------------------
+// Field numbers 1..17 and the consumed payload tags mirror the upstream
+// alttech.v1.Envelope exactly. Tags AltStrategy does not read are omitted.
+message Envelope {
+    uint32 schema_version = 1;
+    string message_id = 2;
+    string event_type = 3;
+    Exchange exchange = 4;
+    int64 instrument_id = 5;
+    string exchange_symbol = 6;
+    int64 exchange_timestamp_ms = 7;
+    int64 produced_at_ms = 8;
+    string trace_id = 9;
+    string source_service = 10;
+    MarketType market_type = 11;
+    string connection_id = 12;
+    int64 sequence = 13;
+    string source_channel = 14;
+    int64 local_receive_time_ms = 15;
+    QualityState quality_state = 16;
+    int64 canonical_pair_id = 17;
+
+    reserved 20 to 22, 23 to 29, 62, 64;
+
+    oneof payload {
+        FeatureVector feature_vector = 30;
+        MicrostructureVector microstructure_vector = 31;
+        StructureEvent structure_event = 32;
+        RegimeSnapshot regime_snapshot = 33;
+        CombinedRegime combined_regime = 34;
+        GlobalUniverseSnapshot universe_snapshot = 50;
+        GlobalUniverseChange universe_change = 51;
+        VenueFeatureVector venue_feature_vector = 60;
+        CrossVenueFeatureVector cross_venue_feature_vector = 61;
+        CrossVenueMicrostructureVector cross_venue_microstructure_vector = 63;
+        ConsensusStructureZone consensus_structure_zone = 65;
+        BitgetProjectedZone bitget_projected_zone = 66;
+        VenueMarketRegime venue_market_regime = 67;
+        GlobalMarketRegime global_market_regime = 68;
+        CrossVenueQuality cross_venue_quality = 69;
+        VenueAlignment venue_alignment = 70;
+        CrossVenueRevision cross_venue_revision = 71;
+    }
+}

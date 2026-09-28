@@ -1,0 +1,18 @@
+# Credential files. These hold the VPS root password and live exchange API keys
+# in plaintext. They are 0600 on disk and this repository is not currently a git
+# repository -- this rule exists so that `git init` here can never turn a local
+# convenience file into commit history, which is not reversible by deletion.
+vps.md
+vps1.md
+*.env
+.env*
+
+# Build and staging output
+build/
+*.o
+*.so
+*.a
+
+# Local scratch
+*.log
+*.tmp

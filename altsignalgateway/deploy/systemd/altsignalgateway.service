@@ -1,0 +1,42 @@
+[Unit]
+Description=AltSignalGateway — VPS1 FINAL TradeSignal boundary (durable journal + TLS WebSocket)
+Wants=network-online.target
+After=network-online.target nats-server.service postgresql.service altsignalquality.service
+# Restart attempts are unlimited. The delay increases between attempts and is
+# capped at five minutes, allowing transient dependencies time to recover.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=altsignalgateway
+Group=altsignalgateway
+EnvironmentFile=/etc/altsignalgateway/common.env
+ExecStart=/opt/altsignalgateway/bin/altsignalgateway run \
+    --config /etc/altsignalgateway/altsignalgateway.yaml
+Restart=on-failure
+RestartSec=10
+# 10 s after the first failure, growing to 5 min over five steps.
+RestartSteps=5
+RestartMaxDelaySec=5min
+KillSignal=SIGTERM
+TimeoutStartSec=5min
+# Long enough for the drain sequence: stop ingesting, close every session
+# (requeueing what they held), then flush the delivery pump's pending writes.
+TimeoutStopSec=45
+# Liveness. The supervisor pings at half this budget and ONLY while the delivery
+# pump's database access is healthy and the listener is up, so a wedged pump is
+# restarted instead of reporting health it cannot vouch for.
+WatchdogSec=60
+
+# This service holds no model and no dataset: its footprint is the journal
+# window it is currently delivering, which is bounded by
+# websocket.max_queued_messages per session.
+MemoryMax=256M
+CPUQuota=50%
+
+# The listener binds a privileged-adjacent port only if configured below 1024;
+# at the default 9443 no capability is needed at all.
+ReadWritePaths=/var/lib/altsignalgateway
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=AltTech market analytics
+Wants=network-online.target alttech-schema.service alttech.service
+After=network-online.target alttech-schema.service alttech.service
+
+# The database and NATS topology are validated explicitly before startup and are
+# never mutated as a side effect of starting the target.
+
+[Install]
+WantedBy=multi-user.target

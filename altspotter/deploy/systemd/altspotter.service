@@ -1,0 +1,60 @@
+[Unit]
+Description=altspotter market-data platform (ingestion, storage, history, integrity, order books)
+Documentation=https://github.com/quaxis/altspotter
+After=postgresql.service nats-server.service network-online.target
+Wants=postgresql.service nats-server.service network-online.target
+
+[Service]
+Type=notify
+User=altspotter
+Group=altspotter
+EnvironmentFile=/etc/altspotter/common.env
+ExecStart=/opt/altspotter/bin/altspotter run --config /etc/altspotter/altspotter.yaml --common /etc/altspotter/common.yaml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStartSec=120
+TimeoutStopSec=60
+# The heartbeat is emitted by the main loop (see runner.cpp). Restart=on-failure
+# only catches a process that exits; this catches one that is still "active"
+# while every component thread is blocked and nothing is being collected.
+# 90s is comfortably above the 1s loop tick and the 60s stop timeout.
+WatchdogSec=90
+
+# One process runs the four-venue platform (Bitget + Binance USDS-M + Bybit +
+# OKX): per-venue WS io threads, REST workers, writer threads and in-memory
+# order books, plus the shared storage/aggregation/retention components.
+# Memory limits are sized for a small (3 GB RAM) VPS shared with PostgreSQL
+# and NATS; raise them proportionally on a larger host.
+LimitNOFILE=65536
+LimitCORE=0
+TasksMax=4096
+MemoryHigh=1024M
+MemoryMax=1536M
+
+# Sandbox hardening.
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,58 @@
+[Unit]
+Description=altstrategy — self-contained VPS1 adaptive decision engine (no order execution)
+Documentation=file:/opt/altstrategy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# A wedged engine must not stay "active". The main loop pings twice per
+# interval, so one missed tick is tolerated and a stopped loop is not.
+WatchdogSec=60
+User=altstrategy
+Group=altstrategy
+# Shared infrastructure credentials (NATS URL, PostgreSQL DSN).
+EnvironmentFile=/etc/altstrategy/common.env
+ExecStart=/opt/altstrategy/bin/altstrategy-service \
+    --config /etc/altstrategy/altstrategy.yaml \
+    --common /etc/altstrategy/common.yaml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# One process: the event-driven engine + the maintenance scheduler + the shared
+# PgPool/NATS worker threads.
+MemoryMax=1G
+TasksMax=64
+
+# Self-contained archive + training-snapshot exports live here (§43).
+StateDirectory=altstrategy
+ReadWritePaths=/var/lib/altstrategy
+
+# --- sandbox (baseline used by every platform service) ---
+UMask=0027
+LimitCORE=0
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+
+[Install]
+WantedBy=multi-user.target

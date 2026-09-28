@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+// altsignalquality.v1 — AltSignalQuality's OWNED contract: the last learned
+// filter between AltStrategy's candidate proposals and VPS2.
+//
+// AltSignalQuality does not restate, reshape or re-derive a trade. The final
+// signal carries AltStrategy's `TradeSignalProposal` BYTE-FOR-BYTE (vendored
+// altstrategy.v1) plus one thing this service owns: a calibrated quality score
+// and the accept/reject decision taken on it. No position size, leverage,
+// balance, order id or execution instruction ever appears here either.
+//
+// Field numbers are frozen once a consumer ships (guard:
+// tests/unit/test_wire_contract.cpp).
+package altsignalquality.v1;
+
+import "vendor/decision.proto";   // vendored altstrategy.v1
+
+// ------------------------------ enums ---------------------------------------
+
+enum QualityDecision {
+    QUALITY_DECISION_UNSPECIFIED = 0;
+    DECISION_ACCEPTED = 1;
+    DECISION_REJECTED = 2;
+}
+
+// WHY a decision was taken. A score-based accept and a cold-start pass-through
+// are not the same event and must never be indistinguishable downstream.
+enum DecisionBasis {
+    DECISION_BASIS_UNSPECIFIED = 0;
+    BASIS_MODEL = 1;                    // an ACTIVE model scored this signal
+    BASIS_COLD_START = 2;               // no ACTIVE model; configured cold-start policy
+    BASIS_MODEL_UNUSABLE = 3;           // model present but unloadable/incompatible
+    BASIS_UPSTREAM_NOT_RECOMMENDED = 4; // AltStrategy withheld recommended_for_execution
+    BASIS_MALFORMED_SIGNAL = 5;         // candidate failed contract validation
+    BASIS_SCORE_BELOW_FLOOR = 6;        // configured hard floor, independent of threshold
+    BASIS_SIGNAL_STALE = 7;             // older than max_signal_age_sec: never scored
+    // Checked before everything else, including staleness: a plan that would
+    // hold a position past the hard ceiling is refused whatever a model would
+    // have said. It had no wire value, so the audit stream carried the stack's
+    // highest-priority refusal as DECISION_BASIS_UNSPECIFIED.
+    BASIS_HOLDING_EXCEEDS_CEILING = 8;
+}
+
+// ------------------------------ evaluation ----------------------------------
+
+// The full machine-readable diagnosis of one candidate signal. Emitted for
+// ACCEPTED and REJECTED alike: a filter that only reports what it let through
+// cannot be audited.
+message SignalQualityEvaluation {
+    string evaluation_id = 1;
+    string signal_proposal_id = 2;      // the idempotency key (AltStrategy-owned)
+    string candidate_id = 3;
+    int64 canonical_pair_id = 4;
+    string symbol = 5;
+    string strategy_id = 6;
+    string strategy_version = 7;
+    altstrategy.v1.Side side = 8;
+    altstrategy.v1.ProposalGrade proposal_grade = 9;
+    bool upstream_recommended = 10;
+
+    bool has_quality_score = 11;        // false => quality_score is meaningless
+    double quality_score = 12;          // calibrated P(positive outcome), [0,1]
+    double raw_score = 13;              // pre-calibration model output, [0,1]
+    double decision_threshold = 14;
+    QualityDecision decision = 15;
+    DecisionBasis basis = 16;
+    repeated string reason_codes = 17;
+
+    string model_id = 18;
+    int32 model_version = 19;
+    string feature_schema_version = 20;
+    string feature_schema_hash = 21;
+    string calibration_version = 22;
+    string label_spec_version = 23;
+    int32 feature_count = 24;
+    int32 missing_feature_count = 25;
+
+    string context_id = 26;
+    int64 context_revision = 27;
+    int64 signal_created_at_ms = 28;    // T0 — the information cut-off
+    int64 evaluated_at_ms = 29;
+    int64 inference_latency_us = 30;
+}
+
+// ------------------------------ final signal --------------------------------
+
+// The FINAL TradeSignal: published only for ACCEPTED candidates, and only ever
+// once per signal_proposal_id (deterministic final_signal_id + JetStream
+// dedup + the durable evaluation row).
+message FinalTradeSignal {
+    string final_signal_id = 1;                     // sha256-derived from signal_proposal_id
+    altstrategy.v1.TradeSignalProposal proposal = 2; // unchanged candidate
+    SignalQualityEvaluation quality = 3;
+    int64 published_at_ms = 4;
+    string producer_version = 5;                     // altsignalquality build version
+}
+
+// ------------------------------ model lifecycle -----------------------------
+
+message ModelLifecycleEvent {
+    string model_id = 1;
+    string status = 2;      // CANDIDATE | VALIDATED | APPROVED | ACTIVE | REJECTED | RETIRED | ROLLBACK
+    string event = 3;       // registered | transition | trained | activated | retired | rejected | rolled_back
+    string detail_json = 4; // machine-readable metrics/gate detail
+    int64 created_at_ms = 5;
+}
+
+// ------------------------------ transport envelope --------------------------
+
+message Envelope {
+    uint32 schema_version = 1;   // 1 for altsignalquality.v1
+    string message_id = 2;
+    string event_type = 3;
+    int64 canonical_pair_id = 4;
+    string symbol = 5;
+    int64 produced_at_ms = 6;
+    string trace_id = 7;
+    string correlation_id = 8;
+    string source_service = 9;   // "altsignalquality"
+
+    oneof payload {
+        FinalTradeSignal final_trade_signal = 20;
+        SignalQualityEvaluation quality_evaluation = 21;
+        ModelLifecycleEvent model_event = 22;
+    }
+}

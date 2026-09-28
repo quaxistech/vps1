@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "alttech/common.proto";
+
+// Vendored from AltTech's analytics.proto, field-for-field. This is the
+// canonical contract for the per-venue analytics vectors AltTech publishes --
+// reference_lite among them -- not a lookalike written to match observed bytes.
+// Field numbers and types must stay identical to the producer's.
+
+enum AnalyticsVectorStatus {
+    ANALYTICS_VECTOR_STATUS_UNSPECIFIED = 0;
+    ANALYTICS_VECTOR_STATUS_NOT_READY = 1;
+    ANALYTICS_VECTOR_STATUS_WARMING = 2;
+    ANALYTICS_VECTOR_STATUS_VALID = 3;
+    ANALYTICS_VECTOR_STATUS_INCOMPLETE_INPUT = 4;
+    ANALYTICS_VECTOR_STATUS_REVISED = 5;
+    ANALYTICS_VECTOR_STATUS_INVALID = 6;
+}
+
+message VenueFeatureVector {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_VENUE
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    Timeframe timeframe = 5;
+    int64 bar_open_time_ms = 6;
+    int64 bar_revision = 7;
+    string profile = 8;            // bitget_core | reference_lite
+    string feature_set_name = 9;
+    int32 feature_set_version = 10;
+    string schema_hash = 11;
+    string engine_version = 12;
+    repeated float values = 13 [packed = true];
+    bytes validity_bitmap = 14;
+    AnalyticsVectorStatus status = 15;
+    QualityState venue_quality = 16;
+    int64 analytics_revision = 17;
+    int64 computed_at_ms = 18;
+}
+
+// One venue's contribution to a consensus estimate.
+message VenueContribution {
+    Exchange exchange = 1;
+    double weight = 2;              // normalized quality/liquidity weight [0,1]
+    double value = 3;               // the venue value that entered the estimator
+    bool included = 4;              // false if trimmed / excluded as outlier
+    double freshness_ms = 5;        // snapshot age used for weighting
+    double relative_spread = 6;
+    double depth_usdt = 7;
+    QualityState quality = 8;
+    string exclude_reason = 9;      // empty when included
+}
+
+// The consensus view across venues: what all four together say about one
+// instrument, and how far the execution venue sits from it. Not attributable to
+// any single venue, so the envelope carries EXCHANGE_UNSPECIFIED and identifies
+// the instrument by canonical pair.
+message CrossVenueFeatureVector {
+    AnalyticsScope scope = 1;      // ANALYTICS_SCOPE_CROSS_VENUE
+    int64 canonical_pair_id = 2;
+    Timeframe timeframe = 3;
+    int64 bar_open_time_ms = 4;
+    string feature_set_name = 5;   // cross_venue_core
+    int32 feature_set_version = 6;
+    string schema_hash = 7;
+    string method_version = 8;     // consensus method + version, reproducible
+    repeated float values = 9 [packed = true];
+    bytes validity_bitmap = 10;
+    AnalyticsVectorStatus status = 11;
+    CrossVenueQualityStatus quality_status = 12;
+    uint32 venue_mask = 13;
+    uint32 missing_venue_mask = 14;
+    uint32 stale_venue_mask = 15;
+    uint32 desynced_venue_mask = 16;
+    double confidence = 17;
+    repeated VenueContribution contributions = 18;
+    int64 analytics_revision = 19;
+    int64 computed_at_ms = 20;
+}

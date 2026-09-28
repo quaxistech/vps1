@@ -1,0 +1,9 @@
+# Shared parameters. Production copy: /etc/altspotter/common.yaml (root:altspotter, 0640).
+# ${VAR} values are expanded from the environment (/etc/altspotter/common.env).
+environment: ${ALTSPOTTER_ENVIRONMENT}
+log_level: ${ALTSPOTTER_LOG_LEVEL}
+timezone: UTC
+instance_id: ${ALTSPOTTER_INSTANCE_ID}
+nats_url: ${ALTSPOTTER_NATS_URL}
+postgres_dsn: ${ALTSPOTTER_POSTGRES_DSN}
+shutdown_timeout_sec: 25

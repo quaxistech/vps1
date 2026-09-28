@@ -1,0 +1,36 @@
+# Configured observation universe: USDT-margined linear perpetuals.
+# A base asset is actually observed only while it is listed AND active on
+# every enabled venue (the global four-venue intersection rule); anything
+# missing on one venue is excluded everywhere automatically. Only bases that
+# trade as a plain <BASE>USDT linear perpetual on ALL enabled venues belong
+# here (no venue-specific 1000x multiplier contracts, no venue exclusives).
+quote_asset: USDT
+contract_type: perpetual
+assets:
+  - { base: BTC,   expected_symbol: BTCUSDT }
+  - { base: ETH,   expected_symbol: ETHUSDT }
+  - { base: SOL,   expected_symbol: SOLUSDT }
+  - { base: XRP,   expected_symbol: XRPUSDT }
+  - { base: BNB,   expected_symbol: BNBUSDT }
+  - { base: DOGE,  expected_symbol: DOGEUSDT }
+  - { base: ADA,   expected_symbol: ADAUSDT }
+  - { base: TRX,   expected_symbol: TRXUSDT }
+  - { base: LINK,  expected_symbol: LINKUSDT }
+  - { base: AVAX,  expected_symbol: AVAXUSDT }
+  - { base: BCH,   expected_symbol: BCHUSDT }
+  - { base: LTC,   expected_symbol: LTCUSDT }
+  - { base: DOT,   expected_symbol: DOTUSDT }
+  - { base: NEAR,  expected_symbol: NEARUSDT }
+  - { base: APT,   expected_symbol: APTUSDT }
+  - { base: ARB,   expected_symbol: ARBUSDT }
+  - { base: OP,    expected_symbol: OPUSDT }
+  - { base: SUI,   expected_symbol: SUIUSDT }
+  - { base: FIL,   expected_symbol: FILUSDT }
+  - { base: ATOM,  expected_symbol: ATOMUSDT }
+  - { base: UNI,   expected_symbol: UNIUSDT }
+  - { base: ETC,   expected_symbol: ETCUSDT }
+  - { base: AAVE,  expected_symbol: AAVEUSDT }
+  - { base: INJ,   expected_symbol: INJUSDT }
+  - { base: TIA,   expected_symbol: TIAUSDT }
+  - { base: WLD,   expected_symbol: WLDUSDT }
+  - { base: HBAR,  expected_symbol: HBARUSDT }

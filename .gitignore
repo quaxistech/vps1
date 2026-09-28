@@ -1,0 +1,23 @@
+# Generated builds and release artifacts
+**/build/
+**/dist/
+**/runtime/
+
+# Local deployment targets and credentials
+**/vps1.md
+**/vps.md
+**/.env
+**/*.env
+**/.env.*
+!**/.env.example
+!**/*.env.example
+**/*.creds
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# Local scratch
+**/*.log
+**/*.tmp
+**/__pycache__/

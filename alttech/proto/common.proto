@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+// Exact fixed-point decimal: value = mantissa * 10^(-scale).
+// Bitget decimal strings are parsed digit-by-digit; binary floating point is never involved.
+message Decimal {
+    sint64 mantissa = 1;
+    int32 scale = 2; // 0..18
+}
+
+// Venue identity. Numeric values match PostgreSQL exchanges.id and the
+// AltSpotter Exchange enum. EXCHANGE_BINANCE is Binance USDⓈ-M futures
+// (code binance_usdm); spot is out of scope for the platform.
+enum Exchange {
+    EXCHANGE_UNSPECIFIED = 0;
+    EXCHANGE_BITGET = 1;
+    EXCHANGE_BINANCE = 2;
+    EXCHANGE_OKX = 3;
+    EXCHANGE_BYBIT = 4;
+}
+
+// Market segment of a venue. All four supported venues are USDT-margined
+// linear perpetuals; the enum mirrors AltSpotter (additive only).
+enum MarketType {
+    MARKET_TYPE_UNSPECIFIED = 0;
+    MARKET_TYPE_USDT_PERP = 1;
+}
+
+// Live data-quality state of a venue stream/field, mirrored from AltSpotter's
+// envelope. NOT_AVAILABLE = the venue did not deliver the value (never read a
+// zero as data); NOT_APPLICABLE = the field does not exist for this market.
+enum QualityState {
+    QUALITY_STATE_UNSPECIFIED = 0;
+    QUALITY_STATE_VALID = 1;
+    QUALITY_STATE_DEGRADED = 2;
+    QUALITY_STATE_STALE = 3;
+    QUALITY_STATE_DESYNCED = 4;
+    QUALITY_STATE_NOT_AVAILABLE = 5;
+    QUALITY_STATE_NOT_APPLICABLE = 6;
+}
+
+// Scope of an analytics record. VENUE = one exchange; CROSS_VENUE = canonical
+// pair consensus across the four venues; BITGET_PROJECTED = a cross-venue
+// structure/level re-expressed in Bitget's current price coordinate.
+enum AnalyticsScope {
+    ANALYTICS_SCOPE_UNSPECIFIED = 0;
+    ANALYTICS_SCOPE_VENUE = 1;
+    ANALYTICS_SCOPE_CROSS_VENUE = 2;
+    ANALYTICS_SCOPE_BITGET_PROJECTED = 3;
+}
+
+// Cross-venue aggregate quality. STRICT_VALID = all four venues
+// valid and skew within bounds; DEGRADED_3_OF_4 = Bitget + two references;
+// DEGRADED_2_OF_4 = Bitget + one reference; INVALID = Bitget stale/desynced,
+// no valid reference, alignment broken or incompatible input.
+enum CrossVenueQualityStatus {
+    CROSS_VENUE_QUALITY_UNSPECIFIED = 0;
+    CROSS_VENUE_QUALITY_STRICT_VALID = 1;
+    CROSS_VENUE_QUALITY_DEGRADED_3_OF_4 = 2;
+    CROSS_VENUE_QUALITY_DEGRADED_2_OF_4 = 3;
+    CROSS_VENUE_QUALITY_INVALID = 4;
+}
+
+// Event-time bar-window alignment status.
+enum AlignmentStatus {
+    ALIGNMENT_STATUS_UNSPECIFIED = 0;
+    ALIGNMENT_STATUS_WAITING = 1;
+    ALIGNMENT_STATUS_STRICT_ALIGNED = 2;
+    ALIGNMENT_STATUS_DEGRADED_ALIGNED = 3;
+    ALIGNMENT_STATUS_LATE_REVISION = 4;
+    ALIGNMENT_STATUS_INVALID = 5;
+}
+
+// Enum value == interval length in minutes.
+enum Timeframe {
+    TIMEFRAME_UNSPECIFIED = 0;
+    TF_1M = 1;
+    TF_5M = 5;
+    TF_15M = 15;
+    TF_30M = 30;
+    TF_1H = 60;
+    TF_4H = 240;
+    TF_1D = 1440;
+}
+
+enum CandleSource {
+    CANDLE_SOURCE_UNSPECIFIED = 0;
+    CANDLE_SOURCE_WS = 1;
+    CANDLE_SOURCE_REST_BOOTSTRAP = 2;
+    CANDLE_SOURCE_REST_RECONCILE = 3;
+    CANDLE_SOURCE_REST_REPAIR = 4;
+    CANDLE_SOURCE_AGGREGATION = 5;
+}
+
+enum QualityStatus {
+    QUALITY_UNSPECIFIED = 0;
+    QUALITY_OK = 1;
+    QUALITY_INCOMPLETE = 2;
+    QUALITY_SUSPECT = 3;
+}

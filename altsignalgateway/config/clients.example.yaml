@@ -1,0 +1,36 @@
+# AltSignalGateway WebSocket client credentials.
+# Production copy: /etc/altsignalgateway/clients.yaml
+#                  (root:altsignalgateway, 0640 — the service refuses to start
+#                   if this file is world-readable).
+#
+# THIS FILE IS NOT A TEMPLATE TO COPY VERBATIM. Every secret below is a
+# ${VAR} reference resolved from /etc/altsignalgateway/common.env; no key
+# material appears here, in the repository, in a release archive or in a log.
+#
+# Generating a key:
+#     openssl rand -hex 32
+#
+# Rotating one: add a SECOND entry for the same client_id with a new key_id,
+# let the consumer switch to it, then remove the old entry. The key_id is what
+# an AUTH frame selects, so both are valid during the overlap and neither side
+# needs a coordinated restart.
+
+clients:
+  # Example execution consumer identity.
+  - client_id: vps2-executor
+    key_id: vps2-executor-k1
+    secret_hex: ${ALTSIGNALGATEWAY_CLIENT_VPS2_SECRET}
+    # Grant only the capabilities this client requires.
+    capabilities: [receive, ack, resume, query]
+    # Duplicate-session policy is "newest wins": a second concurrent session for
+    # this client_id supersedes the oldest one. See docs/WEBSOCKET_PROTOCOL.md.
+    max_sessions: 1
+
+  # A read-only observer used for operational checks. It may receive and resume
+  # but NOT acknowledge, so watching the feed can never advance the executor's
+  # durable cursor.
+  - client_id: vps1-observer
+    key_id: vps1-observer-k1
+    secret_hex: ${ALTSIGNALGATEWAY_CLIENT_OBSERVER_SECRET}
+    capabilities: [receive, resume, query]
+    max_sessions: 2

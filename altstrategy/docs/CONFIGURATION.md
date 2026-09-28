@@ -1,0 +1,35 @@
+# Configuration
+
+One production config: `/etc/altstrategy/altstrategy.yaml`
+(`config/altstrategy.example.yaml`); shared infra in
+`/etc/altstrategy/common.yaml` (NATS URL, PostgreSQL DSN). No per-strategy config
+files — strategy parameter sets are versioned in the database.
+
+## Sections
+
+- `postgres_pool_size` — shared PG pool size.
+- `inputs` — `alttech_subjects`, `prediction_subjects`, `universe_subjects`.
+- `context` — `context_ttl_sec`, `max_component_age_sec`, and the ordered
+  `bitget_feature_names` / `cross_venue_feature_names` that decode AltTech's
+  compact vectors (must match the AltTech feature-set order).
+- `strategies` — `min_candidate_rr`, `candidate_ttl_sec`.
+- `adaptive_allocator` — `prior_strength` (Bayesian k), `edge_scale`,
+  `weight_min/max`, `half_life_days`.
+- `ranking` — champion/challenger policy ids, `close_gap`.
+- `trade_plan` — `min_stop_bps`, `max_entry_timeout_sec`,
+  `default_max_slippage_bps`, `max_holding_hours` (48).
+- `outcomes` — `bitget_exchange_id`, `candles_table`, `trades_table`,
+  `prefer_raw_trades`, `scan_interval_sec`.
+- `execution_feedback` — subject, `required: false`.
+- `drift` / `calibration` / `lifecycle` — intervals, min samples, cooldown.
+- `training_snapshots` — `export_root`, `format` (csv|parquet), `interval_sec`,
+  retention windows.
+- `resources` — `max_inflight_pairs`, `batch_db_writes`.
+- `logging` — `level`.
+
+## Validation
+
+`altstrategy-config-check --file <yaml> --kind <common|service>` validates the
+config before start. The deploy runs the common-config check against the new
+release binary. `${ENV_VAR}` placeholders are expanded from the environment;
+a missing variable is an error (secrets stay explicit).

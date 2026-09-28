@@ -1,0 +1,7 @@
+# Incremental trading universe. Only WLD is enabled while coin #1 is being
+# repaired and validated; another asset is appended only after the current one
+# passes its frozen walk-forward/OOS and SHADOW gates.
+quote_asset: USDT
+contract_type: perpetual
+assets:
+  - { base: WLD,    expected_symbol: WLDUSDT }

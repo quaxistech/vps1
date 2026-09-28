@@ -1,0 +1,12 @@
+# BEGIN altspotter MANAGED ACCESS
+# This block must precede Ubuntu's generic `host all all` rules. The restore
+# drill uses the same constrained application role against an isolated DB;
+# archive SQL is never executed as the PostgreSQL superuser.
+# TYPE  DATABASE                         USER     ADDRESS       METHOD
+host    altspotter                              altspotter_app  127.0.0.1/32  scram-sha-256
+host    "/^altspotter_restore_test_[0-9]+$"     altspotter_app  127.0.0.1/32  scram-sha-256
+host    all                              altspotter_app  127.0.0.1/32  reject
+host    altspotter                              altspotter_app  ::1/128       scram-sha-256
+host    "/^altspotter_restore_test_[0-9]+$"     altspotter_app  ::1/128       scram-sha-256
+host    all                              altspotter_app  ::1/128       reject
+# END altspotter MANAGED ACCESS

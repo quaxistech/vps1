@@ -1,0 +1,196 @@
+# AltSignalQuality unified service configuration.
+# Production copy: /etc/altsignalquality/altsignalquality.yaml
+#                  (root:altsignalquality, 0640).
+# One file drives every subcommand: run / train / validate / model-status /
+# dataset-build / nats-setup.
+#
+# ${VARS} are expanded from the environment (/etc/altsignalquality/common.env
+# under systemd); a missing variable is a startup error, never an empty default.
+
+environment: ${ALTSIGNALQUALITY_ENVIRONMENT}
+log_level: ${ALTSIGNALQUALITY_LOG_LEVEL}
+timezone: UTC
+instance_id: ${ALTSIGNALQUALITY_INSTANCE_ID}
+nats_url: ${ALTSIGNALQUALITY_NATS_URL}
+postgres_dsn: ${ALTSIGNALQUALITY_POSTGRES_DSN}
+shutdown_timeout_sec: 25
+
+# --- external contracts ------------------------------------------------------
+# The values below define the AltStrategy integration; omitting the whole
+# section is equivalent. A second instance can use another configuration file.
+wiring:
+  id: bitget-core
+  objective: binary:signal_quality
+
+  input:
+    # The stream belongs to AltStrategy: it is validated here, never created or
+    # reconfigured. The only thing this service owns on it is its durable.
+    stream: ALTSTRATEGY_DECISIONS
+    subject_filter: signal.proposed.>
+    durable: signalquality-candidates
+
+  output:
+    # Deliberately OUTSIDE the `signal.>` namespace: that root is bound to
+    # AltStrategy's stream, and publishing there would make this service's
+    # output another service's retention problem and consumer cursors.
+    stream: ALTSIGNALQUALITY_SIGNALS
+    final_subject_prefix: signalquality.final            # + ".<symbol>.v1"
+    evaluation_subject_prefix: signalquality.evaluation  # + ".<symbol>.v1"
+    model_event_subject_prefix: signalquality.model      # + ".<event>.v1"
+
+  # AltStrategy's schema is read read-only over the SAME connection: both
+  # schemas live in the shared AltSpotter database, so no FDW is involved.
+  altstrategy_schema: altstrategy
+  # Maximum stop distance eligible for training examples and as-of priors.
+  # This data-selection bound is not applied to live signals.
+  max_stop_distance_bps: 1000.0
+  model_root: /var/lib/altsignalquality/models
+
+# --- live evaluation ---------------------------------------------------------
+evaluator:
+  postgres_pool_size: 3
+  fetch_batch: 32
+  fetch_timeout_ms: 2000
+  model_poll_interval_sec: 30
+  prior_reload_interval_sec: 300
+  # A candidate older than this window describes a market that no longer
+  # exists. It is recorded and rejected, never scored: a stale signal that
+  # scores well is still a stale signal.
+  max_signal_age_sec: 900
+  # The evaluation stream (ACCEPTED and REJECTED alike) is the audit trail.
+  # Turn it off only under hard JetStream disk pressure.
+  publish_evaluations: true
+
+# --- decision policy ---------------------------------------------------------
+policy:
+  # What to do with a signal that passes validity checks.
+  #   PASS_THROUGH_ALL — forward every valid signal (the default; production);
+  #   REJECT_ALL — forward nothing (a deliberate freeze).
+  # The name is retained for compatibility; this policy applies whether or not
+  # a diagnostic quality model is available.
+  cold_start: PASS_THROUGH_ALL
+  # Retired: must be false (true is refused at start-up).
+  require_upstream_recommendation: false
+  # Retired: a learned score never gates a signal here. Must be 0 (a non-zero
+  # value is refused at start-up rather than silently ignored).
+  min_quality_score: 0.0
+
+# --- as-of priors ------------------------------------------------------------
+# Historical behaviour of a strategy / pair / regime, computed ONLY from
+# outcomes that had already matured at the moment the signal was created.
+priors:
+  # Pseudo-count: the sample size at which a cell's own estimate and the global
+  # estimate weigh the same. The default matches AltStrategy's
+  # adaptive_allocator.prior_strength.
+  prior_strength: 20.0
+  half_life_days: 30.0
+
+# --- dataset materialisation -------------------------------------------------
+dataset:
+  postgres_pool_size: 2
+  prior_interval_sec: 300
+  example_interval_sec: 300
+  retention_interval_sec: 21600
+  prior_batch: 20000
+  example_batch: 2000
+  backfill_batch: 1000
+  # Backfill reconstructs the vector through the SAME assembler from
+  # AltStrategy's point-in-time archive for signals this service never saw.
+  # Turn it off only to build a dataset strictly from live evaluations.
+  backfill_enabled: true
+  backfill_lookback_days: 400
+  # How many batches one pass may drain. The first backfill on a populated box
+  # is tens of thousands of signals; a batch every five minutes would take a day
+  # before the service could train at all.
+  backfill_max_batches_per_pass: 60
+
+# --- in-process training -----------------------------------------------------
+# No Python, no external jobs, no timers. On first start there is no model: the
+# service serves under its cold-start policy and accumulates history until
+# min_rows eligible examples exist.
+training:
+  # Off: this service decides validity; its learned score never gates a signal
+  # (policy.hpp decide()). Enable only to produce the diagnostic score.
+  enabled: false
+  bootstrap_if_no_active: true
+  auto_promote: true            # false = stop at APPROVED and wait for an operator
+  interval_hours: 24
+  start_hour_utc: 3             # -1 = any hour
+  retry_minutes: 60
+  lookback_days: 180
+  max_rows: 400000
+  # Below this the cycle defers: the service stays in cold start rather than
+  # training on a sample too small to walk-forward over.
+  min_rows: 400
+  folds: 3
+  # The embargo sits ON TOP of the label-maturation purge. A label arrives up to
+  # the hard 48h holding limit later, and adjacent signals on one instrument
+  # overlap; 12h covers the residual correlation.
+  embargo_minutes: 720
+  validation_fraction: 0.25
+
+  # LightGBM. Deliberately small and heavily regularised: hundreds-to-thousands
+  # of signals against 111 features is exactly the regime where a deep forest
+  # memorises the training slice and the walk-forward gates then (correctly)
+  # reject everything it produces.
+  learning_rate: 0.03
+  num_leaves: 15
+  min_data_in_leaf: 30
+  max_depth: 4
+  feature_fraction: 0.5
+  bagging_fraction: 0.8
+  bagging_freq: 1
+  lambda_l1: 0.5
+  lambda_l2: 10.0
+  max_iterations: 500
+  early_stopping_rounds: 40
+  min_iterations: 10
+  threads: 1
+  time_budget_sec: 900
+  max_matrix_mib: 256
+
+  # Threshold search on the purged validation slice.
+  min_acceptance_rate: 0.15
+  max_acceptance_rate: 0.95
+  min_accepted: 30
+  min_calibration_rows: 100
+
+  # A dataset that is effectively single-class cannot train a useful filter and
+  # its metrics mislead rather than merely weaken.
+  min_positive_rate: 0.05
+  max_positive_rate: 0.95
+  # At least this share of the declared feature contract must actually vary in
+  # the dataset. Below it the model is fitted on a handful of columns while the
+  # report claims a 110-feature contract. On a deployment where AltStrategy does
+  # not persist its context snapshot and AltML is not wired, roughly a third of
+  # the contract is constant or absent — which is exactly what this catches.
+  min_informative_feature_share: 0.30
+
+  # Statistical uncertainty. The promotion gate reads the LOWER bound of the
+  # uplift's confidence interval, not its point estimate: at this stack's
+  # dispersion a hundred trades routinely swing tens of basis points with no
+  # edge behind them. The interval is a MOVING BLOCK bootstrap, because signals
+  # minutes apart under a 48h holding limit are not independent draws.
+  bootstrap_confidence: 0.95
+  bootstrap_replicates: 2000
+  min_uplift_lower_bound: 0.0
+
+  # Promotion gates (docs/PROMOTION_GATES.md).
+  min_mean_fold_auc: 0.52
+  min_positive_folds: 2
+  min_return_per_candidate_uplift: 0.0
+  min_win_rate_uplift: 0.0
+  max_ece: 0.15
+  min_stability_share: 0.60
+  stability_min_bucket_samples: 25
+
+  # Live evaluation defers work when CPU pressure is high. PSI is used where
+  # available; the load average is the fallback.
+  max_cpu_pressure_pct: 20.0
+  # Fallback for kernels without PSI. Absolute one-minute load average.
+  max_load_average: 6.0
+  min_free_mem_mib: 384
+
+model_registry:
+  postgres_pool_size: 1
+  poll_interval_sec: 30

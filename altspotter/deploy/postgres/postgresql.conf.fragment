@@ -1,0 +1,25 @@
+# altspotter PostgreSQL tuning fragment.
+# Installed as /etc/postgresql/16/main/conf.d/altspotter.conf (sized for a
+# small VPS shared with NATS and the altspotter service).
+
+listen_addresses = '127.0.0.1'          # never exposed to the network
+timezone = 'UTC'
+log_timezone = 'UTC'
+
+max_connections = 60
+shared_buffers = 512MB
+effective_cache_size = 1536MB
+work_mem = 16MB
+maintenance_work_mem = 128MB
+
+wal_compression = lz4
+min_wal_size = 512MB
+max_wal_size = 2GB
+checkpoint_completion_target = 0.9
+
+random_page_cost = 1.1                   # SSD-backed storage
+effective_io_concurrency = 128
+
+log_min_duration_statement = 2000
+log_line_prefix = '%m [%p] %q%u@%d '
+log_autovacuum_min_duration = 10000

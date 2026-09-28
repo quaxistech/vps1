@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package altspotter.v1;
+
+import "common.proto";
+
+enum InstrumentStatus {
+    INSTRUMENT_STATUS_UNSPECIFIED = 0;
+    INSTRUMENT_STATUS_ACTIVE = 1;      // tradable USDT perpetual, subscribed
+    INSTRUMENT_STATUS_SUSPENDED = 2;   // exchange-side maintenance / limited
+    INSTRUMENT_STATUS_DELISTED = 3;
+    INSTRUMENT_STATUS_NOT_LISTED = 4;  // whitelisted but absent on the exchange
+}
+
+message InstrumentSpec {
+    Exchange exchange = 1;
+    int64 instrument_id = 2;          // internal id from PostgreSQL
+    string exchange_symbol = 3;       // e.g. BTCUSDT
+    string base_asset = 4;
+    string quote_asset = 5;
+    string contract_type = 6;         // perpetual
+    InstrumentStatus status = 7;
+    int64 list_time_ms = 8;           // 0 when unknown
+    Decimal tick_size = 9;
+    int32 price_precision = 10;
+    Decimal quantity_step = 11;
+    int32 quantity_precision = 12;
+    Decimal min_order_quantity = 13;
+    Decimal min_notional = 14;
+    Decimal maker_fee_rate = 15;
+    Decimal taker_fee_rate = 16;
+    int32 min_leverage = 17;
+    int32 max_leverage = 18;
+    int32 funding_interval_hours = 19;
+    string normalized_hash = 20;      // sha256 of normalized spec
+    int64 spec_version = 21;
+    string settle_asset = 22;         // USDT for all supported venues
+    Decimal contract_value = 23;      // base units per contract (1 when sizes are base units)
+    MarketType market_type = 24;
+}
+
+enum InstrumentEventType {
+    INSTRUMENT_EVENT_UNSPECIFIED = 0;
+    INSTRUMENT_EVENT_CREATED = 1;
+    INSTRUMENT_EVENT_UPDATED = 2;
+    INSTRUMENT_EVENT_ENABLED = 3;
+    INSTRUMENT_EVENT_DISABLED = 4;
+}
+
+message InstrumentEvent {
+    InstrumentEventType type = 1;
+    InstrumentSpec spec = 2;
+    string reason = 3;
+}
+
+message InstrumentSnapshot {
+    repeated InstrumentSpec instruments = 1;
+    int64 catalog_sync_ms = 2;
+}

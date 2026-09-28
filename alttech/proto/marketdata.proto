@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+
+// ---------------------------------------------------------------------------
+// Global observation universe input (four-venue intersection).
+//
+// AltTech decodes these from the AltSpotter `evt.universe.>` subjects to react
+// to universe transitions in real time. Field numbers mirror AltSpotter's
+// `marketdata.proto` exactly so the package-agnostic wire form is identical;
+// the durable snapshot is also read from PostgreSQL `global_observation_universe`.
+// AltTech is a consumer here and never produces universe messages.
+// ---------------------------------------------------------------------------
+
+message UniverseVenueState {
+    Exchange exchange = 1;
+    bool listed = 2;             // linear USDT perpetual exists on the venue
+    bool active = 3;             // status allows public trading
+    string exchange_symbol = 4;  // venue symbol when listed
+    string detail = 5;
+}
+
+message UniversePairState {
+    int64 canonical_pair_id = 1;  // == instrument_id of the canonical pair
+    string base_asset = 2;
+    string quote_asset = 3;
+    bool eligible = 4;            // present and active on all four venues
+    string status = 5;            // ELIGIBLE_ALL_VENUES / MISSING_ON_* / ...
+    string reason = 6;
+    repeated UniverseVenueState venues = 7;
+}
+
+message GlobalUniverseSnapshot {
+    int64 computed_at_ms = 1;
+    repeated UniversePairState pairs = 2;
+}
+
+message GlobalUniverseChange {
+    UniversePairState pair = 1;
+    string previous_status = 2;
+}

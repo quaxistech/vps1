@@ -1,0 +1,26 @@
+[Unit]
+Description=altspotter JetStream streams/consumers provisioning (oneshot)
+After=nats-server.service network-online.target
+Requires=nats-server.service
+Before=altspotter.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=altspotter
+Group=altspotter
+EnvironmentFile=/etc/altspotter/common.env
+ExecStart=/opt/altspotter/bin/altspotter nats-init
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

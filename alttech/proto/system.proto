@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+import "trade.proto";
+import "candle.proto";
+import "feature.proto";
+import "microstructure.proto";
+import "structure.proto";
+import "regime.proto";
+import "status.proto";
+import "marketdata.proto";
+import "analytics.proto";
+
+// Every NATS payload produced or consumed by AltTech is one serialized
+// Envelope.
+//
+// Fields 1..17 and the input payload tags 20..22, 50 and 51 mirror AltSpotter's
+// envelope exactly, so AltTech decodes its inputs without a producer library:
+// venue identity, event-time metadata and live quality all come straight off
+// the wire.
+//
+// Tags 23..29 are reserved. AltTech reads per-venue derivatives and liquidity
+// context from AltSpotter's durable 1m PostgreSQL aggregates rather than
+// decoding per-event market-data messages, so AltSpotter's market-data payload
+// tags never need a slot here and can never collide with AltTech's own output
+// payloads.
+message Envelope {
+    uint32 schema_version = 1;
+    string message_id = 2;
+    string event_type = 3;
+    Exchange exchange = 4;
+    int64 instrument_id = 5;
+    string exchange_symbol = 6;
+    int64 exchange_timestamp_ms = 7;
+    int64 produced_at_ms = 8;
+    string trace_id = 9;
+    string source_service = 10;
+    // Venue identity and event-time metadata, mirroring AltSpotter.
+    MarketType market_type = 11;
+    string connection_id = 12;        // producing WS connection (diagnostics)
+    int64 sequence = 13;              // venue sequence/update id when meaningful
+    string source_channel = 14;       // venue channel/stream name
+    int64 local_receive_time_ms = 15; // local receive timestamp of source event
+    QualityState quality_state = 16;
+    int64 canonical_pair_id = 17;     // == instrument_id for usdt_perp pairs
+
+    reserved 23 to 29;
+
+
+    oneof payload {
+        // Inputs consumed from AltSpotter, at AltSpotter's own tags.
+        Trade trade = 20;
+        Candle candle = 21;
+        CandleBatch candle_batch = 22;
+        GlobalUniverseSnapshot universe_snapshot = 50;
+        GlobalUniverseChange universe_change = 51;
+
+        // Primary-venue analytics outputs.
+        FeatureVector feature_vector = 30;
+        MicrostructureVector microstructure_vector = 31;
+        StructureEvent structure_event = 32;
+        RegimeSnapshot regime_snapshot = 33;
+        CombinedRegime combined_regime = 34;
+        StatusEvent status_event = 35;
+
+        // Per-venue and cross-venue analytics outputs.
+        VenueFeatureVector venue_feature_vector = 60;
+        CrossVenueFeatureVector cross_venue_feature_vector = 61;
+        VenueMicrostructureVector venue_microstructure_vector = 62;
+        VenueStructureZone venue_structure_zone = 64;
+        ConsensusStructureZone consensus_structure_zone = 65;
+        BitgetProjectedZone bitget_projected_zone = 66;
+        VenueMarketRegime venue_market_regime = 67;
+        GlobalMarketRegime global_market_regime = 68;
+        CrossVenueQuality cross_venue_quality = 69;
+        VenueAlignment venue_alignment = 70;
+    }
+}

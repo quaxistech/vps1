@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+
+enum FeatureVectorStatus {
+    FEATURE_STATUS_UNSPECIFIED = 0;
+    FEATURE_STATUS_NOT_READY = 1;
+    FEATURE_STATUS_WARMING = 2;
+    FEATURE_STATUS_VALID = 3;
+    FEATURE_STATUS_INCOMPLETE_INPUT = 4;
+    FEATURE_STATUS_REVISED = 5;
+    FEATURE_STATUS_INVALID = 6;
+}
+
+// One live core feature vector for one closed bar. Value order is defined by
+// the feature_set (name + version); consumers must verify compatibility.
+message FeatureVector {
+    Timeframe timeframe = 1;
+    int64 bar_open_time_ms = 2;
+    int64 bar_revision = 3;
+    string feature_set_name = 4;    // talib-core
+    int32 feature_set_version = 5;  // 1
+    string schema_hash = 6;         // sha256 of the ordered member names
+    string engine_version = 7;      // talib-0.7.1
+    repeated float values = 8 [packed = true];
+    bytes validity_bitmap = 9;      // bit i -> values[i] usable
+    FeatureVectorStatus status = 10;
+    int64 computed_at_ms = 11;
+}

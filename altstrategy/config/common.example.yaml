@@ -1,0 +1,9 @@
+# Shared parameters. Production copy: /etc/altstrategy/common.yaml (root:altstrategy, 0640).
+# ${VAR} values are expanded from the environment (/etc/altstrategy/common.env).
+environment: ${ALTSTRATEGY_ENVIRONMENT}
+log_level: ${ALTSTRATEGY_LOG_LEVEL}
+timezone: UTC
+instance_id: ${ALTSTRATEGY_INSTANCE_ID}
+nats_url: ${ALTSTRATEGY_NATS_URL}
+postgres_dsn: ${ALTSTRATEGY_POSTGRES_DSN}
+shutdown_timeout_sec: 25

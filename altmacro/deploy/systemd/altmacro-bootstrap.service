@@ -1,0 +1,21 @@
+[Unit]
+Description=altmacro historical bootstrap (one-shot, resumable)
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Deliberately NOT wanted by any target and NOT timed. The bootstrap is run by
+# hand, because it walks a rate-limited archive for hours and because a
+# scheduled re-run would add nothing: the live poller keeps the series current.
+[Service]
+Type=oneshot
+User=altmacro
+Group=altmacro
+ExecStart=/opt/altmacro/bin/altmacro bootstrap --config /etc/altmacro/altmacro.yaml
+EnvironmentFile=/etc/altmacro/altmacro.env
+TimeoutStartSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/altmacro
+Nice=15
+IOSchedulingClass=idle

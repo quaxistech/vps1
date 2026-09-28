@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package altml.v1;
+
+import "common.proto";
+
+// Live ML prediction for one closed bar (native C++ inference).
+message PredictionV1 {
+    string prediction_id = 1;
+    Timeframe timeframe = 2;
+    int64 bar_open_time_ms = 3;
+    int64 bar_revision = 4;
+    string model_id = 5;
+    int32 model_version = 6;
+    string feature_set_version = 7;   // talib-core:1
+    double probability_up = 8;
+    double probability_down = 9;
+    // NOT PRODUCED by this service, and `optional` so that stays visible.
+    //
+    // The model is a binary directional classifier: it estimates P(up) for one
+    // bar and nothing else. It has no estimate of magnitude, of which barrier is
+    // touched first, or of how long a position would be held. These fields were
+    // published as plain proto3 doubles and never set, so every consumer read
+    // 0.0 -- indistinguishable from a genuine estimate of zero return, zero
+    // excursion and zero holding time. AltStrategy's wire_codec reads all five.
+    //
+    // Marked optional rather than deleted: the field numbers and wire encoding
+    // are unchanged, so existing consumers keep working, and one that wants to
+    // know can now ask has_expected_return() instead of trusting a zero.
+    // schema 1: never produced. schema 2: E[simple return over the horizon],
+    // GROSS of costs (the net figures are fields 27/28).
+    optional double expected_return = 10;
+    optional double probability_target_before_stop = 11;
+    optional double expected_mfe = 12;
+    optional double expected_mae = 13;
+    optional double expected_holding_time_min = 14;
+    double confidence = 15;           // |p_up - 0.5| * 2
+    string quality_status = 16;       // VALID | DEGRADED
+    int64 computed_at_ms = 17;
+    int64 latency_us = 18;
+
+    // --- inter-service contract fields -------------------------------------
+    //
+    // Added when AltStrategy became a real consumer. Until then the message was
+    // self-describing only in context: the venue lived in the subject and a
+    // model declining to answer was represented by no message at all, which a
+    // consumer cannot distinguish from a message it missed.
+    int32 prediction_schema_version = 19;  // 1
+    Exchange target_venue = 20;            // the venue this prediction is ABOUT
+    // The model declined. Carried explicitly so a consumer can tell "abstained"
+    // from "not delivered"; probabilities are meaningless when this is set.
+    bool abstain = 21;
+
+    // --- schema 2: econ models (one per horizon) ----------------------------
+    //
+    // The target is SHORT / NEUTRAL / LONG over a fixed horizon against the
+    // all-in round-trip cost (AltML econ-labels). The probabilities are
+    // temperature-calibrated on a validation slice that precedes the model's
+    // out-of-sample evaluation. probability_up / probability_down carry the
+    // LONG / SHORT class probabilities in this schema; the explicit fields
+    // below are the ones to read.
+    //
+    // expected_net_return_*_bps is the calibrated class probabilities weighted
+    // by what each class was worth on the rows the model was fitted on, minus
+    // the round trip. It is an ESTIMATE of the market outcome of a taker entry
+    // at the bar close held for the horizon -- not a forecast of any plan's
+    // execution result.
+    int32 horizon_minutes = 22;
+    string objective = 23;                          // multiclass:econ_class_<h>
+    optional double probability_long = 24;
+    optional double probability_neutral = 25;
+    optional double probability_short = 26;
+    optional double expected_net_return_long_bps = 27;
+    optional double expected_net_return_short_bps = 28;
+    optional double round_trip_cost_bps = 29;
+    string calibrator = 30;                         // temperature-1
+    string recipe_version = 31;                     // recipe-1
+    int32 aligned_missing = 32;                     // aligned sources absent at T0
+    // schema 3: the versioned cost model the estimate was netted with, the
+    // model's validated policy margin, and magnitudes per side (bps)
+    string cost_model_version = 33;
+    optional double fee_bps = 34;              // round trip, both legs taker
+    optional double spread_bps = 35;           // observed at T0 (full spread)
+    optional double impact_bps = 36;           // round trip, an assumption
+    bool spread_observed = 37;                 // false: fallback assumption used
+    optional double policy_margin_bps = 38;    // absent: no validated margin
+    string policy_version = 39;
+    optional double favorable_long_bps = 40;   // E[max favourable excursion]
+    optional double adverse_long_bps = 41;     // E[max adverse excursion], <= 0
+    optional double favorable_short_bps = 42;
+    optional double adverse_short_bps = 43;
+    // schema 4: market-prediction semantics (VPS1 = market intelligence).
+    // The class probabilities are "probabilities" only when AltML's holdout
+    // calibration test passed (probability_calibrated); otherwise they are
+    // calibrated-by-intent raw scores and say so. label_definition states
+    // what up / flat / down mean; the excursions are magnitudes (>= 0) over
+    // the horizon, from a dedicated regression or from the class means
+    // (magnitude_source); model_role is ACTIVE (passed the market-quality
+    // gates) or SHADOW.
+    bool probability_calibrated = 44;
+    string label_definition = 45;
+    optional double expected_up_excursion_bps = 46;
+    optional double expected_down_excursion_bps = 47;
+    string magnitude_source = 48;
+    string calibration_version = 49;
+    string model_role = 50;
+}

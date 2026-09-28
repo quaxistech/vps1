@@ -1,0 +1,10 @@
+/build/
+/dist/
+/.env
+/common.env
+/vps.md
+**/__pycache__/
+*.py[cod]
+/wheelhouse/
+
+vps1.md

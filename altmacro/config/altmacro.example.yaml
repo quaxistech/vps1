@@ -1,0 +1,100 @@
+# altmacro — external market and macro reference data for VPS1.
+#
+# NOTHING SECRET BELONGS IN THIS FILE. The database password is read from
+# ALTMACRO_DB_PASSWORD and provider tokens from the variables named under
+# `providers`. A literal password or token here is a hard configuration error,
+# not a convenience: it would otherwise end up in every backup, diff and
+# deployment log from the moment it was written.
+
+instance_id: altmacro-1
+log_level: info
+
+# User-Agent sent to providers. Replace the example contact URL with an
+# operator-controlled contact page when deploying this service.
+user_agent: "altmacro/1.0 (+https://altmacro.invalid)"
+watchdog_margin_sec: 30
+
+database:
+  host: 127.0.0.1
+  port: 5432
+  database: altmacro
+  user: altmacro_app
+  pool_size: 4
+  statement_timeout_ms: 60000
+
+nats:
+  enabled: true
+  # Carries credentials, so it comes from the environment: the name lives
+  # here, the value lives only in /etc/altmacro/altmacro.env.
+  url: ${ALTMACRO_NATS_URL}
+  # Follows the stack's shape: alttech publishes alttech.feature.<...>, so this
+  # publishes altmacro.bar.<instrument>.<basis> and altmacro.reference.<instrument>.
+  stream: ALTMACRO_SERIES
+  subject_prefix: altmacro
+  publish_timeout_ms: 5000
+
+bootstrap:
+  # Start of the historical request window. Each provider's actual available
+  # coverage is recorded independently; earlier values are never synthesized.
+  history_start: "" # Required: set within the available AltSpotter history.
+  history_end: ""          # empty means "up to now at the moment it runs"
+  batch_rows: 5000         # bounds memory; the full window is millions of rows
+  reference_chunk_days: 3650
+  resume: true
+
+poll:
+  # Polling intervals and lookback windows for market bars and references.
+  intraday_interval_sec: 900
+  intraday_lookback_hours: 6
+  reference_interval_sec: 3600
+  reference_lookback_days: 10
+
+providers:
+  dukascopy:
+    enabled: true
+  fred:
+    enabled: true
+  alfred:
+    enabled: true
+  frankfurter:
+    enabled: true
+  # These registry entries are currently disabled. The binary must implement
+  # an adapter before enabling either provider.
+  tiingo:
+    enabled: false
+    credential_env_var: ALTMACRO_TIINGO_TOKEN
+  twelvedata:
+    enabled: false
+    credential_env_var: ALTMACRO_TWELVEDATA_TOKEN
+
+# The working set. Semantics for each of these live in the database registry;
+# this list only says which of them this instance carries.
+instruments:
+  # Intraday, both sides of the book.
+  - code: FX.USDCNH
+  - code: METAL.XAUUSD
+  - code: FX.EURUSD
+  - code: FX.USDJPY
+
+  # CNY/CNH kept apart: an offshore market quote, an official reference and a
+  # central-bank fixing are three different numbers and are never merged.
+  - code: REF.USDCNY.FED
+  - code: REF.USDCNY.PBOC
+
+  # Daily references. USD/KRW is daily-only: Dukascopy does not carry USDKRW,
+  # and no keyless intraday source was found for it.
+  - code: REF.USDKRW.FED
+  - code: REF.GBPUSD.FED
+  - code: REF.AUDUSD.FED
+  - code: REF.USDJPY.FED
+  - code: REF.EURUSD.FED
+
+  # Rates.
+  - code: RATE.US.2Y
+  - code: RATE.US.10Y
+  - code: RATE.US.10Y.REAL
+
+  # Risk.
+  - code: IDX.VIX
+  - code: IDX.SPX
+  - code: IDX.NDX

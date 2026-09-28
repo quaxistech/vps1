@@ -1,0 +1,52 @@
+[Unit]
+Description=altmacro — external market and macro reference data
+Documentation=file:/opt/altmacro/README.md
+After=network-online.target postgresql.service nats-server.service
+Wants=network-online.target
+PartOf=altstack.target
+
+[Service]
+Type=notify
+User=altmacro
+Group=altmacro
+ExecStart=/opt/altmacro/bin/altmacro run --config /etc/altmacro/altmacro.yaml
+EnvironmentFile=/etc/altmacro/altmacro.env
+Restart=always
+RestartSec=10
+# The heartbeat is sent from inside every wait -- rate-limit, backoff, and the
+# publish loop -- so a healthy service pings every few seconds regardless of how
+# long a poll pass takes. The deadline still has to clear the one stretch that
+# cannot be interrupted: a single HTTP request, which is 10s to connect plus up
+# to 60s to read. 300s leaves ample margin over that while still catching a
+# genuinely wedged process within five minutes.
+WatchdogSec=300
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/altmacro
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+# The bootstrap holds one batch at a time by design; this is a ceiling that
+# turns a leak into a restart rather than into a host-wide memory shortage.
+MemoryMax=1500M
+# Deliberately modest: this service must never crowd the realtime pipeline it
+# sits beside. Its work is I/O-bound waiting on rate-limited providers.
+CPUQuota=60%
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target

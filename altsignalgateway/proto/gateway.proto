@@ -1,0 +1,1014 @@
+syntax = "proto3";
+
+// altsignalgateway.v1 — AltSignalGateway's OWNED contract: the canonical FINAL
+// TradeSignal as it leaves VPS1, and the WebSocket protocol that carries it.
+//
+// TWO INDEPENDENT VERSIONS live here and must never be conflated:
+//
+//   schema_version   the shape of SignalPayload — what a signal IS.
+//   protocol_version the framing and state machine — how a signal TRAVELS.
+//
+// A new field on SignalPayload bumps the schema version and leaves the protocol
+// untouched; a new frame type bumps the protocol version and leaves every
+// journalled payload readable.
+//
+//   schema_version 3    VPS1 signal semantics (vps1-signal-1): adds
+//                       MarketForecastBlock (tag 11) -- AltML's market
+//                       prediction on every served horizon, with its state,
+//                       role and calibration verdict -- and SetupBlock (tag
+//                       12), the setup's measured description. A VPS1 signal
+//                       is an EVENT plus the market's expected behaviour; it
+//                       carries no execution decision (recommended_for_execution
+//                       is always false). Schema-2 payloads in the journal stay
+//                       readable and re-hash to the same value.
+//   schema_version 2    adds MacroSnapshot (tag 10) to SignalPayload: AltTech's
+//                       macro / cross-asset block as of T0. Every schema-1
+//                       payload in the journal stays readable and re-hashes to
+//                       the same value; a schema-2 reader sees `macro.present
+//                       == false` on it.
+//   protocol_version 2  adds the QUERY frames (SECTION 3): a client may ask for
+//                       one journalled signal, a bounded page of the signal
+//                       history, or the extended market context of a signal.
+//                       Every protocol-1 frame keeps its number and meaning; a
+//                       protocol-1 client is still served, without the query
+//                       capability.
+//
+// WHAT THIS CONTRACT IS NOT. The Gateway takes no trading decision. Every
+// number below is either copied verbatim from an upstream service or is
+// Gateway-owned transport metadata (sequence, message id, hashes, timestamps).
+// Nothing here is computed from market data, re-scored, re-ranked or rounded.
+//
+// ENUMS ARE NOT RESTATED. Side, EntryType, HoldingClass, ProposalGrade,
+// ProposalState, ContextQuality, QualityDecision and DecisionBasis are the
+// PRODUCERS' OWN enum types, imported from the vendored contracts. A local copy
+// would be one rename away from mapping ENTRY_STOP_LIMIT onto ENTRY_LIMIT in
+// silence. The vendored files are byte-compared against the producers by
+// tests/unit/test_wire_contract.cpp.
+//
+// Field numbers are frozen once a consumer ships.
+package altsignalgateway.v1;
+
+import "vendor/signalquality.proto";  // altsignalquality.v1 (vendored verbatim)
+import "vendor/decision.proto";       // altstrategy.v1      (vendored verbatim)
+
+// ===========================================================================
+// SECTION 1 — the canonical FINAL TradeSignal
+// ===========================================================================
+
+// A named scalar carried verbatim from an upstream feature summary.
+//
+// A protobuf `map<string,double>` would have been the obvious encoding and is
+// deliberately NOT used: map field ordering is unspecified on the wire, and the
+// integrity hash below is taken over the serialized payload. Repeated entries
+// sorted by `name` are canonical by construction — the same inputs always
+// produce the same bytes, on any runtime.
+message NamedValue {
+    string name = 1;
+    double value = 2;
+}
+
+// A regime view as the decision engine saw it. Every scalar is presence-gated:
+// AltTech publishes "no reading" as an absent value, and a 0.0 confidence and
+// an unknown confidence are not the same statement.
+message RegimeView {
+    string regime = 1;                 // AltTech GlobalRegime name, e.g. "RANGE"
+    bool has_confidence = 2;
+    double confidence = 3;
+    bool has_trend_strength = 4;
+    double trend_strength = 5;
+    bool has_volatility_regime = 6;
+    double volatility_regime = 7;
+    bool has_liquidity_quality = 8;
+    double liquidity_quality = 9;
+}
+
+// ------------------------------ trade plan ---------------------------------
+
+// The executable trade, exactly as AltStrategy planned it and AltSignalQuality
+// accepted it. Prices, distances and horizons are copied; nothing is recomputed.
+//
+// `has_*` companions exist wherever the upstream encodes "absent" as 0.0
+// (entry range, trigger, secondary target). Forwarding a bare 0.0 would offer a
+// consumer a price of zero and let it act on it.
+message TradePlan {
+    // --- instrument identity, resolved to something a venue can execute ------
+    string exchange = 1;              // AltSpotter exchange code, e.g. "bitget"
+    // The venue-executable symbol from AltSpotter's instrument registry, e.g.
+    // "XRPUSDT". NOT the internal token that appears on the NATS subject.
+    string symbol = 2;
+    int64 canonical_pair_id = 3;      // AltSpotter's cross-venue instrument id
+    string base_asset = 4;
+    string quote_asset = 5;
+    string market_type = 6;           // "usdt_perp"
+
+    // --- direction and entry -------------------------------------------------
+    altstrategy.v1.Side side = 10;
+    altstrategy.v1.EntryType entry_type = 11;
+    // For ENTRY_MARKET this is the reference price the plan geometry was
+    // computed against, not an order price.
+    double entry_price = 12;
+    bool has_entry_range = 13;
+    double entry_lower = 14;
+    double entry_upper = 15;
+    bool has_trigger_price = 16;
+    double trigger_price = 17;
+    double max_slippage_bps = 18;
+    bool post_only_allowed = 19;
+    double expected_fill_time_p50_min = 20;
+    double expected_fill_time_p90_min = 21;
+    int64 entry_fill_timeout_ms = 22;
+
+    // --- exits ---------------------------------------------------------------
+    double stop_loss_price = 30;
+    string stop_basis = 31;           // free-text provenance of the stop level
+    double stop_distance_bps = 32;
+    double stop_distance_atr = 33;
+    double take_profit_price = 34;
+    bool has_secondary_target = 35;
+    double secondary_target_price = 36;
+    string target_basis = 37;
+    double target_distance_bps = 38;
+    double expected_rr = 39;
+
+    // --- time horizon --------------------------------------------------------
+    altstrategy.v1.HoldingClass holding_class = 50;
+    int64 expected_holding_time_p50_ms = 51;
+    int64 expected_holding_time_p90_ms = 52;
+    int64 max_holding_time_ms = 53;
+    int64 time_stop_at_ms = 54;       // absolute UTC ms
+    int64 valid_until_ms = 55;        // the plan's own validity bound (= expiry)
+
+    // --- producing strategy (repeated in the strategy block, kept here so a
+    //     trade can be routed without reading another block) -------------------
+    string strategy_id = 60;
+    string strategy_version = 61;
+}
+
+// ------------------------------ strategy -----------------------------------
+
+message StrategyBlock {
+    string strategy_id = 1;
+    string strategy_version = 2;
+    string parameter_set_id = 3;
+    string candidate_id = 4;
+    string ranking_id = 5;
+    string ranking_policy_id = 6;
+    altstrategy.v1.ProposalGrade proposal_grade = 7;
+    altstrategy.v1.ProposalState state = 8;
+    int32 plan_version = 9;
+    // AltStrategy's own measured-edge verdict. AltSignalQuality forwards only
+    // recommended candidates by default; the flag is transmitted so a consumer
+    // never has to infer it from the mere presence of the signal.
+    bool recommended_for_execution = 10;
+    double strategy_confidence = 11;
+    double ensemble_agreement = 12;
+    double adaptive_score = 13;
+    altstrategy.v1.ContextQuality context_quality = 14;
+
+    // The plan's own outcome distribution. Gated: an all-zero distribution is
+    // what an unpopulated proposal looks like, and it is not a forecast of a
+    // 0% chance of anything.
+    // Present only when AltStrategy says a model produced them
+    // (`edge_estimated`), never inferred from the values being nonzero.
+    //
+    // Tags 21, 23, 24, 25, 27 and 29 are RESERVED: p_entry_reached,
+    // p_stop_before_target, p_timeout, p_ambiguous, expected_gross_return and
+    // expected_utility were carried here while AltStrategy had already reserved
+    // their tags for never having been computed, so every signal shipped them
+    // as zeros next to the one real number. Reserved rather than reused, so a
+    // reader built against the old shape cannot mis-parse a new message.
+    reserved 21, 23, 24, 25, 27, 29;
+    reserved "p_entry_reached", "p_stop_before_target", "p_timeout",
+             "p_ambiguous", "expected_gross_return", "expected_utility";
+
+    bool has_outcome_probabilities = 20;
+    double p_target_before_stop = 22;
+    bool has_expected_returns = 26;
+    double expected_net_return = 28;
+
+    repeated string reason_codes = 30;
+    repeated string risk_flags = 31;
+    repeated altstrategy.v1.ProposalWarning warnings = 32;
+}
+
+// ------------------------------ AltML --------------------------------------
+
+// AltML's contribution to this signal.
+//
+// `present` is the ONLY gate. On a deployment where AltML has no ACTIVE model
+// the proposal still carries ml_uncertainty=0, ml_ood=0 and ml_abstain=true —
+// protobuf defaults, not measurements. Forwarding those as an AltML output
+// would tell a consumer the model is certain and in-distribution when no model
+// ran at all. The presence test is `model_versions` being non-empty, which is
+// AltStrategy's own record of a forecast having been attached.
+message AltMlBlock {
+    bool present = 1;
+    // Machine-readable why-not, e.g. "NO_MODEL_VERSIONS_ON_PROPOSAL".
+    string absence_reason = 2;
+    repeated string model_versions = 3;
+    bool abstain = 4;
+
+    // Tags 5 and 6 are RESERVED. `uncertainty` and `ood_score` were forwarded
+    // from AltStrategy fields whose tags it had already reserved -- nothing ever
+    // produced them -- so both were structurally zero on every signal, and
+    // `ood_score: 0` reads as a measured all-clear on a check that never ran.
+    reserved 5, 6;
+    reserved "uncertainty", "ood_score";
+
+    // |p_up - 0.5| * 2: distance from a coin flip. This is the one ML number
+    // the stack computes, and it is conviction, not uncertainty.
+    double conviction = 7;
+}
+
+// ------------------------------ signal quality ------------------------------
+
+// AltSignalQuality's verdict, forwarded verbatim.
+message SignalQualityBlock {
+    string evaluation_id = 1;
+    altsignalquality.v1.QualityDecision decision = 2;
+    altsignalquality.v1.DecisionBasis basis = 3;
+    // false => quality_score, raw_score and decision_threshold are meaningless.
+    // A cold-start pass-through and a 0.5 score are different events.
+    bool has_quality_score = 4;
+    double quality_score = 5;          // calibrated P(positive outcome), [0,1]
+    double raw_score = 6;
+    double decision_threshold = 7;
+    repeated string reason_codes = 8;
+    string model_id = 9;
+    int32 model_version = 10;
+    string feature_schema_version = 11;
+    string feature_schema_hash = 12;
+    string calibration_version = 13;
+    string label_spec_version = 14;
+    int32 feature_count = 15;
+    int32 missing_feature_count = 16;
+    int64 evaluated_at_ms = 17;
+    int64 inference_latency_us = 18;
+}
+
+// ------------------------------ market snapshot -----------------------------
+
+// The venue state the decision was actually taken on: AltStrategy's immutable
+// DecisionContext snapshot, addressed by context_id. It is NOT a reading taken
+// when the Gateway journalled the signal — that would be a different market.
+//
+// If retention has already removed the context row, `present` is false and the
+// reason says so. Nothing is substituted.
+message MarketSnapshot {
+    bool present = 1;
+    string absence_reason = 2;
+    int64 event_time_ms = 3;           // the context's own event time
+    int64 available_at_ms = 4;
+    int64 expires_at_ms = 5;
+    int64 context_revision = 6;
+
+    bool has_mark_price = 10;
+    double mark_price = 11;
+    bool has_spread_bps = 12;
+    double spread_bps = 13;
+    bool has_funding_rate = 14;
+    double funding_rate = 15;
+    bool has_fees_bps = 16;
+    double fees_bps = 17;
+    bool has_top_depth_usdt = 18;
+    double top_depth_usdt = 19;
+    bool has_liquidity_rank = 20;
+    double liquidity_rank = 21;
+    bool has_expected_slippage_bps = 22;
+    double expected_slippage_bps = 23;
+
+    // The named analytics the strategies read, sorted by name.
+    repeated NamedValue venue_features = 30;
+    repeated NamedValue cross_venue_features = 31;
+    repeated NamedValue reference_features = 32;
+
+    string global_universe_status = 40;
+    altstrategy.v1.ContextQuality data_quality = 41;
+    uint32 venue_mask = 42;
+    uint32 missing_venue_mask = 43;
+}
+
+// ------------------------------ microstructure ------------------------------
+
+// Order-flow state at T0, carried from the same context snapshot. The Gateway
+// owns no order book and computes nothing here.
+message MicrostructureSnapshot {
+    bool present = 1;
+    string absence_reason = 2;
+    int64 event_time_ms = 3;
+    repeated NamedValue values = 4;    // cvd, cvd_delta, signed_volume, ...
+}
+
+// ------------------------------ regime --------------------------------------
+
+message RegimeBlock {
+    bool present = 1;
+    string absence_reason = 2;
+    RegimeView venue_regime = 3;
+    RegimeView global_regime = 4;
+    bool regime_divergence = 5;
+}
+
+// ------------------------------ execution context ---------------------------
+
+// The venue's own trading constraints for this instrument, resolved from
+// AltSpotter's instrument registry as of T0.
+//
+// This block exists so an execution layer never has to query VPS1 to learn what
+// a valid order looks like. It is NOT a trading instruction: no size, no
+// leverage, no account state.
+//
+// Decimals are STRINGS. tick_size "0.1" as a double is 0.1000000000000000055;
+// rounding a price to that is how an order gets rejected for an invalid tick.
+// The registry stores them as exact decimal strings and they are carried as
+// such.
+message ExecutionContext {
+    bool present = 1;
+    string absence_reason = 2;
+    string exchange = 3;
+    int64 exchange_instrument_id = 4;  // AltSpotter exchange_instruments.id
+    string exchange_symbol = 5;
+    string instrument_status = 6;      // active | suspended | delisted | ...
+    bool whitelisted = 7;
+    int64 spec_version = 8;
+    int64 spec_valid_from_ms = 9;
+
+    string contract_type = 20;
+    string settle_asset = 21;
+    string tick_size = 22;
+    string quantity_step = 23;
+    string min_order_quantity = 24;
+    string min_notional = 25;
+    string contract_value = 26;
+    bool has_price_precision = 27;
+    int32 price_precision = 28;
+    bool has_quantity_precision = 29;
+    int32 quantity_precision = 30;
+    bool has_max_leverage = 31;
+    double max_leverage = 32;
+
+    int64 resolved_at_ms = 40;
+}
+
+// ------------------------------ macro / cross-asset ------------------------
+
+// AltTech's macro-core block: cross-asset reference quantities with no
+// directional rule. It is one vector per minute for the whole system (it
+// belongs to no pair), read as-of T0 from AltTech's table over a read-only
+// foreign connection.
+//
+// FRESHNESS IS INSIDE THE BLOCK. `bar_open_time_ms` is the minute the vector
+// describes and `age_ms` its distance from T0. Every daily-sourced quantity
+// carries its own age column (fixing_age_hours, usdkrw_age_hours,
+// equity_age_hours, rates_age_hours): the hours since that source's newest
+// usable observation was admitted under AltTech's publication-lag model. The
+// intraday quantities are as of the last COMPLETED HOUR plus thirty minutes --
+// the feed is hourly files -- so within one wall-clock hour every vector
+// carries the same FX snapshot. `method_version` names the availability model
+// that produced the block; see docs/SIGNAL_CONTRACT.md for its semantics.
+//
+// `values` lists only the positions that were usable at that minute, sorted by
+// name; `unavailable` lists the rest by name. A position is unusable when its
+// source had no observation yet, was carried forward (a weekend quote), or its
+// window had not filled. Nothing is ever written as 0.0 in place of a reading.
+message MacroSnapshot {
+    bool present = 1;
+    string absence_reason = 2;         // e.g. "NO_MACRO_VECTOR_AT_T0", "MACRO_STALE"
+    string feature_set_name = 3;       // "macro-core"
+    int32 feature_set_version = 4;     // 1
+    string schema_hash = 5;            // sha256 of the ordered member names
+    string method_version = 6;         // AltTech's computation + availability model
+    int64 bar_open_time_ms = 7;        // the minute the block describes (<= T0)
+    int64 computed_at_ms = 8;          // when AltTech last computed that minute
+    int64 age_ms = 9;                  // T0 - bar_open_time_ms
+    string status = 10;                // AltTech's vector status: VALID | INCOMPLETE_INPUT
+    int32 feature_count = 11;          // 40
+    int32 valid_count = 12;
+    repeated NamedValue values = 13;   // usable positions, sorted by name
+    repeated string unavailable = 14;  // the rest, by name, sorted
+    string source_service = 15;        // "alttech"
+}
+
+// ------------------------------ market forecast (schema 3) -----------------
+
+// One horizon of AltML's market prediction as the signal carried it at T0, in
+// the LONG perspective (the signal's side is on the trade plan). VPS1 predicts
+// the market; whether the expected move is worth today's costs is decided
+// downstream.
+//
+// `present` is the gate: the numbers mean nothing when it is false, and
+// `state` says why (MISSING, ABSTAIN, INCOMPATIBLE) or in what condition they
+// are (PRESENT; INCOMPLETE = some of the model's aligned inputs were missing;
+// STALE = older than AltStrategy's freshness bound). The probabilities are
+// PROBABILITIES only when `probability_calibrated` is true (they passed AltML's
+// holdout calibration test); otherwise they are the model's calibrated-by-
+// intent scores and must be read as such.
+message HorizonForecast {
+    int32 horizon_minutes = 1;
+    string state = 2;
+    bool present = 3;
+    string model_id = 4;
+    int32 model_version = 5;
+    string model_role = 6;               // ACTIVE | SHADOW
+    string calibration_version = 7;
+    bool probability_calibrated = 8;
+    double p_up = 9;
+    double p_flat = 10;
+    double p_down = 11;
+    double expected_return_bps = 12;
+    double expected_up_excursion_bps = 13;     // >= 0
+    double expected_down_excursion_bps = 14;   // >= 0
+    int64 bar_open_time_ms = 15;         // the 1m bar the prediction was made on
+    int64 computed_at_ms = 16;
+    int32 aligned_missing = 17;
+    int64 age_ms = 18;                   // T0 - close of that bar
+    // Economic DIAGNOSTIC from AltML's cost model at T0. VPS1 gates nothing on
+    // it; a consumer prices the expected move against its own costs.
+    string cost_model_version = 19;
+    double cost_bps = 20;
+    double expected_net_long_bps = 21;
+    double expected_net_short_bps = 22;
+}
+
+message MarketForecastBlock {
+    bool present = 1;                    // false: the proposal carried no forecast block at all
+    string absence_reason = 2;           // e.g. "NO_MARKET_PREDICTIONS_ON_PROPOSAL"
+    repeated HorizonForecast horizons = 3;   // ascending horizon; always every served horizon
+    // The horizon matching the setup's own holding horizon (nearest of
+    // 15m / 1h / 4h).
+    int32 evaluation_horizon_minutes = 4;
+    string signal_semantics = 5;         // "vps1-signal-1"
+}
+
+// ------------------------------ setup (schema 3) ---------------------------
+
+// The event that made this signal, described by optional named measurements
+// such as distance past the level in ATR, volume anomaly, venue agreement and
+// room to the next zone.
+message SetupBlock {
+    string setup_id = 1;                 // == strategy_id
+    string explanation = 2;              // reserved for the detector's template; may be empty
+    repeated NamedValue descriptors = 3; // sorted by name
+}
+
+// ------------------------------ provenance ----------------------------------
+
+// The full lineage of one signal. Everything needed to reproduce, audit or
+// dispute it without access to any VPS1 service.
+message Provenance {
+    // --- identities ----------------------------------------------------------
+    string signal_proposal_id = 1;     // AltStrategy's idempotency key
+    string candidate_id = 2;
+    string ranking_id = 3;
+    string final_signal_id = 4;        // AltSignalQuality's, == envelope.signal_id
+    string evaluation_id = 5;
+    string context_id = 6;
+    int64 context_revision = 7;
+
+    // --- model / schema lineage ---------------------------------------------
+    string feature_manifest_hash = 10;        // AltStrategy/AltTech feature manifest
+    string quality_feature_schema_version = 11;
+    string quality_feature_schema_hash = 12;
+    string quality_model_id = 13;
+    int32 quality_model_version = 14;
+    string quality_calibration_version = 15;
+    string quality_label_spec_version = 16;
+    repeated string altml_model_versions = 17;
+    string strategy_id = 18;
+    string strategy_version = 19;
+    string parameter_set_id = 20;
+    string ranking_policy_id = 21;
+
+    // --- point-in-time timestamps, UTC unix milliseconds ---------------------
+    int64 signal_created_at_ms = 30;          // T0, the information cut-off
+    int64 context_event_time_ms = 31;
+    int64 context_available_at_ms = 32;
+    int64 quality_evaluated_at_ms = 33;
+    int64 quality_published_at_ms = 34;
+    int64 gateway_received_at_ms = 35;
+    int64 gateway_journaled_at_ms = 36;
+
+    // --- producers -----------------------------------------------------------
+    string altsignalquality_version = 40;     // FinalTradeSignal.producer_version
+    string altsignalgateway_version = 41;
+
+    // --- integrity of the upstream payload -----------------------------------
+    // sha256 over `SignalPayload.source_envelope`, i.e. over the exact bytes
+    // AltSignalQuality put on NATS.
+    string source_envelope_sha256 = 50;
+    string source_subject = 51;
+    string source_stream = 52;
+    uint64 source_stream_sequence = 53;
+}
+
+// ------------------------------ payload / envelope --------------------------
+
+// Everything the signal IS. The integrity hash in the envelope is taken over
+// the deterministic serialization of exactly this message.
+message SignalPayload {
+    TradePlan trade_plan = 1;
+    StrategyBlock strategy = 2;
+    AltMlBlock altml = 3;
+    SignalQualityBlock signal_quality = 4;
+    MarketSnapshot market_snapshot = 5;
+    MicrostructureSnapshot microstructure = 6;
+    RegimeBlock regime = 7;
+    ExecutionContext execution_context = 8;
+    Provenance provenance = 9;
+    MacroSnapshot macro = 10;          // schema_version 2
+    MarketForecastBlock market_forecast = 11;   // schema_version 3
+    SetupBlock setup = 12;                      // schema_version 3
+
+    // The ORIGINAL, AUTHORITATIVE upstream payload: the exact serialized
+    // `altsignalquality.v1.Envelope` this signal was built from, byte for byte
+    // as it arrived on NATS.
+    //
+    // It is carried, not merely hashed, for one reason: a consumer must be able
+    // to prove the canonical projection above against the producer's own
+    // message without asking VPS1 for it. Everything else in this payload is
+    // derivable from these bytes plus two read-only registry lookups.
+    // ~1.3 KB per signal at this stack's volumes.
+    bytes source_envelope = 20;
+}
+
+// Transport identity and integrity. Never contains trade content, so a router
+// or an audit tool can read it without parsing the payload.
+message SignalEnvelope {
+    uint32 schema_version = 1;         // SignalPayload shape (1, 2, 3)
+    uint32 protocol_version = 2;       // framing that carried it (1)
+    // Deterministic in signal_id: a redelivery reproduces it exactly.
+    string message_id = 3;             // asgw_<32 hex>
+    string signal_id = 4;              // == altsignalquality final_signal_id
+    // Gapless, strictly increasing, durable, transactionally allocated.
+    int64 sequence = 5;
+    string signal_type = 6;            // "FINAL_TRADE_SIGNAL"
+    int64 created_at_ms = 7;           // T0 — proposal.created_at_ms
+    int64 expires_at_ms = 8;           // proposal.valid_until_ms
+    int64 journaled_at_ms = 9;         // durable commit in the Gateway journal
+    int64 published_at_ms = 10;        // when THIS frame was serialized
+    string payload_sha256 = 11;        // over the deterministic SignalPayload
+    string producer_service = 12;      // "altsignalgateway"
+    string producer_version = 13;
+    // true when this frame is a RESUME/replay transmission rather than a live
+    // one. The payload is identical either way; only the reason differs.
+    bool replay = 14;
+    uint32 delivery_attempt = 15;      // 1 on first transmission
+}
+
+message SignalMessage {
+    SignalEnvelope envelope = 1;
+    SignalPayload payload = 2;
+}
+
+// ===========================================================================
+// SECTION 2 — the WebSocket protocol
+// ===========================================================================
+
+enum ErrorCode {
+    ERROR_CODE_UNSPECIFIED = 0;
+    ERR_PROTOCOL_VIOLATION = 1;            // a frame that is illegal in this state
+    ERR_UNSUPPORTED_PROTOCOL_VERSION = 2;
+    ERR_UNSUPPORTED_SCHEMA_VERSION = 3;
+    ERR_AUTH_REQUIRED = 4;
+    ERR_AUTH_FAILED = 5;                   // deliberately unspecific to the client
+    ERR_NOT_AUTHORIZED = 6;                // authenticated, but lacks the capability
+    ERR_MESSAGE_TOO_LARGE = 7;
+    ERR_MALFORMED_FRAME = 8;
+    ERR_INVALID_SEQUENCE = 9;
+    ERR_RESUME_REJECTED = 10;
+    ERR_QUEUE_OVERFLOW = 11;               // slow consumer, disconnected
+    ERR_HEARTBEAT_TIMEOUT = 12;
+    ERR_SESSION_SUPERSEDED = 13;           // same client_id connected again
+    ERR_TOO_MANY_CLIENTS = 14;
+    ERR_SERVER_SHUTTING_DOWN = 15;
+    ERR_INTERNAL = 16;
+    ERR_TIMEOUT = 17;                      // a handshake step was not completed
+    // Query outcomes (protocol 2). These are NOT fatal: they travel inside a
+    // QueryResponse and the connection stays up.
+    ERR_INVALID_QUERY = 18;                // a filter, cursor or page size the server cannot honour
+    ERR_NOT_FOUND = 19;                    // no journalled signal with that identity
+    ERR_QUERY_LIMIT = 20;                  // rate limit, page bound or response bound exceeded
+}
+
+enum Capability {
+    CAPABILITY_UNSPECIFIED = 0;
+    CAP_RECEIVE_SIGNALS = 1;
+    CAP_ACK = 2;
+    CAP_RESUME = 3;
+    CAP_QUERY = 4;                 // protocol 2: send QueryRequest frames
+}
+
+enum ResumeMode {
+    RESUME_MODE_UNSPECIFIED = 0;   // rejected: a resume intent is never guessed
+    RESUME_FROM_SEQUENCE = 1;      // deliver non-expired sequence > last_acked_sequence
+    RESUME_LIVE_ONLY = 2;          // skip the backlog, begin at the journal head
+    RESUME_FROM_START = 3;         // deliver the whole retained, non-expired journal
+}
+
+// --- client -> server -------------------------------------------------------
+
+message Hello {
+    uint32 protocol_version = 1;
+    string client_id = 2;
+    string client_version = 3;
+    repeated uint32 supported_schema_versions = 4;
+    bytes client_nonce = 5;            // >= 16 bytes, client-generated
+}
+
+// HMAC-SHA256 over the canonical auth string (docs/SECURITY.md):
+//
+//   "ASGW-AUTH-v1\n" protocol_version "\n" client_id "\n" key_id "\n"
+//   session_id "\n" hex(server_nonce) "\n" hex(client_nonce) "\n" timestamp_ms
+//
+// The server nonce is single-use and bound to this session, so a captured Auth
+// frame cannot be replayed onto another connection.
+message Auth {
+    string key_id = 1;
+    int64 timestamp_ms = 2;
+    bytes server_nonce = 3;            // echoed back, must match byte for byte
+    bytes signature = 4;               // 32 raw bytes
+}
+
+message Resume {
+    ResumeMode mode = 1;
+    int64 last_acked_sequence = 2;     // meaningful only for RESUME_FROM_SEQUENCE
+}
+
+// Confirms PROTOCOL-LEVEL receipt and acceptance of one message.
+//
+// It does NOT mean the trade was executed, an order was accepted or a position
+// was opened. Execution feedback is a different contract on a different path.
+message Ack {
+    string message_id = 1;
+    string signal_id = 2;
+    int64 sequence = 3;
+    int64 client_time_ms = 4;
+}
+
+message HeartbeatAck {
+    bytes nonce = 1;
+    int64 client_time_ms = 2;
+}
+
+// --- server -> client -------------------------------------------------------
+
+message HelloOk {
+    uint32 protocol_version = 1;
+    uint32 schema_version = 2;
+    string server_version = 3;
+    string session_id = 4;
+    string auth_scheme = 5;            // "HMAC-SHA256"
+    bytes server_nonce = 6;            // 32 CSPRNG bytes, single use
+    int64 server_time_ms = 7;
+    int64 auth_timeout_ms = 8;
+    int64 max_clock_skew_ms = 9;
+}
+
+message AuthOk {
+    string client_id = 1;
+    string session_id = 2;
+    repeated Capability capabilities = 3;
+    int64 heartbeat_interval_ms = 4;
+    int64 heartbeat_timeout_ms = 5;
+    uint64 max_message_bytes = 6;
+    // The server's own durable cursor for this client. A client that lost its
+    // state can resume from here instead of replaying the whole journal.
+    int64 last_acked_sequence = 7;
+    int64 journal_head_sequence = 8;
+    int64 resume_timeout_ms = 9;
+}
+
+message ResumeOk {
+    int64 from_sequence_exclusive = 1;
+    int64 backlog_count = 2;           // messages that will follow before ResumeComplete
+    int64 journal_head_sequence = 3;
+    int64 skipped_expired = 4;         // in range, withheld because they had expired
+}
+
+message ResumeComplete {
+    int64 last_sequence = 1;
+    int64 delivered = 2;
+}
+
+message Ready {
+    int64 server_time_ms = 1;
+    int64 journal_head_sequence = 2;
+}
+
+message Heartbeat {
+    bytes nonce = 1;
+    int64 server_time_ms = 2;
+}
+
+message ProtocolError {
+    ErrorCode code = 1;
+    string message = 2;
+    bool fatal = 3;                    // true => the connection closes after this
+}
+
+// Sent by either side before an orderly close.
+message Goodbye {
+    string reason = 1;
+    ErrorCode code = 2;
+}
+
+// --- frames -----------------------------------------------------------------
+
+message ClientFrame {
+    oneof body {
+        Hello hello = 1;
+        Auth auth = 2;
+        Resume resume = 3;
+        Ack ack = 4;
+        HeartbeatAck heartbeat_ack = 5;
+        Goodbye goodbye = 6;
+        QueryRequest query = 7;            // protocol 2
+    }
+}
+
+message ServerFrame {
+    oneof body {
+        HelloOk hello_ok = 1;
+        AuthOk auth_ok = 2;
+        ResumeOk resume_ok = 3;
+        SignalMessage signal = 4;
+        ResumeComplete resume_complete = 5;
+        Ready ready = 6;
+        Heartbeat heartbeat = 7;
+        ProtocolError error = 8;
+        Goodbye goodbye = 9;
+        QueryResponse query_response = 10; // protocol 2
+    }
+}
+
+// ===========================================================================
+// SECTION 3 — queries (protocol 2)
+// ===========================================================================
+//
+// A query is a request/response pair on the same authenticated connection the
+// signals travel on. It is accepted from AUTHENTICATED onwards, needs CAP_QUERY,
+// and never changes anything: there is no frame that writes. Every query is
+// bounded -- by a page size, by a fixed window per timeframe, by the response
+// byte budget -- and a query the server cannot honour within its bounds is
+// answered with a QueryError, not with a truncated page.
+
+enum ContextDetail {
+    CONTEXT_DETAIL_UNSPECIFIED = 0;    // rejected: the caller states what it wants
+    CONTEXT_STANDARD = 1;              // the journalled SignalMessage, exactly as delivered
+    CONTEXT_RICH = 2;                  // + macro block (read as of T0 if the journal predates it)
+                                       //   + derivatives state per venue at T0
+    CONTEXT_FULL = 3;                  // RICH + book and trade-flow state per venue at T0
+                                       //   + bounded candle windows (1m, 5m, 1h) ending at T0
+}
+
+// Filters are ANDed. An unset field does not filter. `side` uses the producer's
+// own enum; `delivery_state` is one of the journal's states.
+message HistoryFilter {
+    string symbol = 1;                 // venue-executable symbol, e.g. "BTCUSDT"
+    int64 canonical_pair_id = 2;
+    string exchange = 3;               // e.g. "bitget"
+    string strategy_id = 4;
+    altstrategy.v1.Side side = 5;
+    string delivery_state = 6;         // JOURNALED|QUEUED|SENT|ACKED|EXPIRED|FAILED
+    int64 from_created_at_ms = 7;      // inclusive, on T0
+    int64 to_created_at_ms = 8;        // exclusive, on T0
+}
+
+// Exactly one of signal_id / sequence.
+message GetSignal {
+    string signal_id = 1;
+    int64 sequence = 2;
+}
+
+// Newest first, keyset-paginated on the journal sequence. `cursor` is the
+// opaque token from the previous page's `next_cursor`; empty means "from the
+// newest". `page_size` 0 means the server default; above the server maximum is
+// refused, not clamped, so a caller never silently receives fewer rows than it
+// believes it asked for.
+message GetHistory {
+    HistoryFilter filter = 1;
+    int32 page_size = 2;
+    string cursor = 3;
+}
+
+message GetContext {
+    string signal_id = 1;
+    ContextDetail detail = 2;
+}
+
+message QueryRequest {
+    string request_id = 1;             // echoed back; the caller's correlation key
+    oneof query {
+        GetSignal get_signal = 2;
+        GetHistory get_history = 3;
+        GetContext get_context = 4;
+    }
+}
+
+// The row a history page carries per signal: the envelope (identity, sequence,
+// hashes, times) plus the decision-relevant scalars projected from the
+// journalled payload. Nothing here is recomputed; the full payload is one
+// GetSignal away.
+message SignalSummary {
+    string exchange = 1;
+    string symbol = 2;
+    int64 canonical_pair_id = 3;
+    altstrategy.v1.Side side = 4;
+    string strategy_id = 5;
+    string strategy_version = 6;
+    altstrategy.v1.EntryType entry_type = 7;
+    double entry_price = 8;
+    double stop_loss_price = 9;
+    double take_profit_price = 10;
+    double expected_rr = 11;
+    altstrategy.v1.HoldingClass holding_class = 12;
+    bool recommended_for_execution = 13;
+    double strategy_confidence = 14;
+    altsignalquality.v1.QualityDecision quality_decision = 15;
+    bool has_quality_score = 16;
+    double quality_score = 17;
+    bool altml_present = 18;
+    double altml_conviction = 19;
+    bool market_snapshot_present = 20;
+    bool macro_present = 21;
+    string delivery_state = 22;
+    int64 last_ack_at_ms = 23;
+    bool market_forecast_present = 24;         // schema 3
+    int32 evaluation_horizon_minutes = 25;     // schema 3
+}
+
+message HistoryEntry {
+    SignalEnvelope envelope = 1;
+    SignalSummary summary = 2;
+}
+
+message HistoryPage {
+    HistoryFilter filter = 1;          // the filter as applied
+    int32 page_size = 2;               // the page size as applied
+    int64 query_time_ms = 3;           // server time the page was read
+    int32 count = 4;                   // entries in this page
+    string next_cursor = 5;            // empty when this is the last page
+    int64 journal_head_sequence = 6;
+    repeated HistoryEntry entries = 7; // newest first
+}
+
+message SignalResult {
+    SignalMessage signal = 1;          // envelope.replay == true
+    string delivery_state = 2;
+}
+
+// --- extended market context (CONTEXT_RICH / CONTEXT_FULL) -----------------
+//
+// Read from AltSpotter's canonical minute tables as of T0: the row whose
+// minute is the last one that had CLOSED by T0 (open_time <= T0 - 60s), never
+// the minute T0 falls inside. `age_ms` is T0 minus that minute's open. Every
+// scalar is presence-gated; the tables store NULL where the venue reported
+// nothing, and NULL is carried as absent, not as 0.
+
+message CandleBar {
+    int64 open_time_ms = 1;
+    double open = 2;
+    double high = 3;
+    double low = 4;
+    double close = 5;
+    double base_volume = 6;
+    double quote_volume = 7;
+    int64 trade_count = 8;
+    bool has_taker_buy_base_volume = 9;
+    double taker_buy_base_volume = 10;
+    bool is_closed = 11;
+    string quality_status = 12;
+}
+
+message CandleWindow {
+    string exchange = 1;
+    string timeframe = 2;              // "1m" | "5m" | "1h"
+    int32 requested_bars = 3;          // the fixed window for this timeframe
+    repeated CandleBar bars = 4;       // oldest first; fewer than requested when history is short
+    string source_table = 5;
+}
+
+message DerivativesSnapshot {
+    string exchange = 1;
+    int64 open_time_ms = 2;
+    int64 age_ms = 3;
+    bool has_mark_price = 4;
+    double mark_price = 5;
+    bool has_index_price = 6;
+    double index_price = 7;
+    bool has_funding_rate = 8;
+    double funding_rate = 9;
+    bool has_next_funding_time_ms = 10;
+    int64 next_funding_time_ms = 11;
+    bool has_open_interest_base = 12;
+    double open_interest_base = 13;
+    bool has_open_interest_quote = 14;
+    double open_interest_quote = 15;
+    bool has_best_bid = 16;
+    double best_bid = 17;
+    bool has_best_ask = 18;
+    double best_ask = 19;
+    bool has_spread = 20;
+    double spread = 21;
+    bool has_turnover_24h = 22;
+    double turnover_24h = 23;
+    string quality_status = 24;
+    string source_table = 25;
+}
+
+message BookSnapshot {
+    string exchange = 1;
+    int64 open_time_ms = 2;
+    int64 age_ms = 3;
+    bool has_best_bid = 4;
+    double best_bid = 5;
+    bool has_best_ask = 6;
+    double best_ask = 7;
+    bool has_mid_price = 8;
+    double mid_price = 9;
+    bool has_spread = 10;
+    double spread = 11;
+    bool has_relative_spread = 12;
+    double relative_spread = 13;
+    bool has_bid_depth_5 = 14;
+    double bid_depth_5 = 15;
+    bool has_ask_depth_5 = 16;
+    double ask_depth_5 = 17;
+    bool has_bid_depth_10 = 18;
+    double bid_depth_10 = 19;
+    bool has_ask_depth_10 = 20;
+    double ask_depth_10 = 21;
+    bool has_book_imbalance_5 = 22;
+    double book_imbalance_5 = 23;
+    bool has_book_imbalance_10 = 24;
+    double book_imbalance_10 = 25;
+    bool has_microprice = 26;
+    double microprice = 27;
+    int64 snapshot_count = 28;
+    string quality_status = 29;
+    string source_table = 30;
+}
+
+message FlowSnapshot {
+    string exchange = 1;
+    int64 open_time_ms = 2;
+    int64 age_ms = 3;
+    int64 trade_count = 4;
+    int64 buy_trade_count = 5;
+    int64 sell_trade_count = 6;
+    bool has_base_volume = 7;
+    double base_volume = 8;
+    bool has_quote_volume = 9;
+    double quote_volume = 10;
+    bool has_aggressive_buy_volume = 11;
+    double aggressive_buy_volume = 12;
+    bool has_aggressive_sell_volume = 13;
+    double aggressive_sell_volume = 14;
+    bool has_signed_volume = 15;
+    double signed_volume = 16;
+    bool has_vwap = 17;
+    double vwap = 18;
+    bool has_largest_trade = 19;
+    double largest_trade = 20;
+    string quality_status = 21;
+    string source_table = 22;
+}
+
+message ExtendedContext {
+    ContextDetail detail = 1;
+    int64 t0_ms = 2;                   // the signal's created_at_ms
+    int64 read_at_ms = 3;              // when these rows were read (they are historical facts;
+                                       //   this is for the record, not a freshness claim)
+    // RICH and FULL. The journalled block when the payload carries one; read
+    // as of T0 from AltTech otherwise. `macro.present == false` with a reason
+    // when neither exists.
+    MacroSnapshot macro = 4;
+    repeated DerivativesSnapshot derivatives = 5;   // one per venue that had a row
+    // FULL only.
+    repeated BookSnapshot book = 6;
+    repeated FlowSnapshot flow = 7;
+    repeated CandleWindow candles = 8;
+    // Groups that could not be read and why, e.g. "candles:1h:NO_ROWS".
+    repeated string absent = 9;
+}
+
+message ContextResult {
+    SignalMessage signal = 1;
+    ExtendedContext extended = 2;      // unset for CONTEXT_STANDARD
+    string delivery_state = 3;
+}
+
+message QueryError {
+    ErrorCode code = 1;
+    string message = 2;
+}
+
+message QueryResponse {
+    string request_id = 1;
+    oneof result {
+        SignalResult signal = 2;
+        HistoryPage history = 3;
+        ContextResult context = 4;
+        QueryError error = 5;
+    }
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run AltTech partition maintenance and retention hourly
+
+[Timer]
+# Hourly, because the shortest retention window is measured in days and the
+# storage budget must be enforced well before it is reached.
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5m
+Unit=alttech-maintenance.service
+
+[Install]
+WantedBy=timers.target

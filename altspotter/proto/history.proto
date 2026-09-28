@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package altspotter.v1;
+
+import "common.proto";
+
+message RepairCommand {
+    int64 gap_id = 1;          // history_gaps.id
+    Timeframe timeframe = 2;
+    int64 from_ms = 3;         // inclusive open_time of first missing minute
+    int64 to_ms = 4;           // inclusive open_time of last missing minute
+    int32 attempt = 5;
+}
+
+enum RepairStatus {
+    REPAIR_STATUS_UNSPECIFIED = 0;
+    REPAIR_STATUS_COMPLETED = 1;
+    REPAIR_STATUS_FAILED = 2;
+    REPAIR_STATUS_PARTIAL = 3;   // exchange has no data for part of the range
+}
+
+message RepairResult {
+    int64 gap_id = 1;
+    RepairStatus status = 2;
+    Timeframe timeframe = 3;
+    int64 from_ms = 4;
+    int64 to_ms = 5;
+    int64 rows_received = 6;
+    int64 rows_published = 7;
+    string error = 8;
+}

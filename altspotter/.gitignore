@@ -1,0 +1,20 @@
+# Credential and connection files. vps1.md names the production host and user
+# (the deploy scripts read both); connect.md is the reader-role guide. Neither
+# belongs in history. This directory is not a git repository today -- the rule
+# exists so that a `git init` here can never turn a local file into commit
+# history, which deletion does not undo. altspotter was the only service
+# without one.
+vps.md
+vps1.md
+connect.md
+*.env
+.env*
+*.creds
+
+# Build output
+build/
+compile_commands.json
+
+# Local scratch
+*.log
+*.tmp

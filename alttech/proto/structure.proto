@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+
+enum StructureEventType {
+    STRUCTURE_EVENT_UNSPECIFIED = 0;
+    STRUCTURE_EVENT_SNAPSHOT = 1;
+    STRUCTURE_EVENT_ZONE_BROKEN = 2;
+    STRUCTURE_EVENT_ZONE_TESTED = 3;
+    STRUCTURE_EVENT_ZONE_FLIPPED = 4;
+    STRUCTURE_EVENT_ZONE_EXPIRED = 5;
+}
+
+// A committed market-structure snapshot or one zone lifecycle transition.
+message StructureEvent {
+    Timeframe timeframe = 1;
+    int64 bar_open_time_ms = 2;
+    StructureEventType type = 3;
+    string algorithm_version = 4;
+    optional int32 active_zone_count = 5;
+    string zone_kind = 6;
+    string resulting_zone_kind = 7;
+    optional double center_price = 8;
+}

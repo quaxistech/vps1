@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+
+enum MarketRegime {
+    MARKET_REGIME_UNSPECIFIED = 0;
+    MARKET_REGIME_UNDEFINED = 1;
+    MARKET_REGIME_LOW_LIQUIDITY = 2;
+    MARKET_REGIME_CHAOTIC = 3;
+    MARKET_REGIME_TREND_UP = 4;
+    MARKET_REGIME_TREND_DOWN = 5;
+    MARKET_REGIME_BREAKOUT = 6;
+    MARKET_REGIME_VOLATILITY_EXPANSION = 7;
+    MARKET_REGIME_VOLATILITY_COMPRESSION = 8;
+    MARKET_REGIME_RANGE = 9;
+}
+
+message RegimeAxes {
+    double trend_strength = 1;
+    double volatility_regime = 2;
+    double volume_regime = 3;
+    optional double momentum_persistence = 4;
+    double liquidity_quality = 5;
+    double data_quality = 6;
+    int64 source_bar_revision = 7;
+    string source_projection_updated_at = 8;
+    string source_feature_computed_at = 9;
+}
+
+message RegimeSnapshot {
+    Timeframe timeframe = 1;
+    int64 bar_open_time_ms = 2;
+    MarketRegime regime = 3;
+    optional MarketRegime previous_regime = 4;
+    double confidence = 5;
+    RegimeAxes axes = 6;
+    string algorithm_version = 7;
+}
+
+message RegimeSummary {
+    Timeframe timeframe = 1;
+    MarketRegime regime = 2;
+    double confidence = 3;
+    RegimeAxes axes = 4;
+    int64 bar_open_time_ms = 5;
+}
+
+message CombinedRegime {
+    MarketRegime primary_regime = 1;
+    repeated RegimeSummary timeframes = 2;
+    string algorithm_version = 3;
+}

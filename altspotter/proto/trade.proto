@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package altspotter.v1;
+
+import "common.proto";
+
+enum TradeSide {
+    TRADE_SIDE_UNSPECIFIED = 0;
+    TRADE_SIDE_BUY = 1;
+    TRADE_SIDE_SELL = 2;
+}
+
+message Trade {
+    string exchange_trade_id = 1;
+    Decimal price = 2;
+    Decimal size = 3;          // base asset quantity
+    TradeSide side = 4;        // taker side
+    int64 exchange_ts_ms = 5;  // UTC milliseconds
+}

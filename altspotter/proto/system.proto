@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package altspotter.v1;
+
+import "common.proto";
+import "trade.proto";
+import "candle.proto";
+import "instrument.proto";
+import "marketdata.proto";
+import "history.proto";
+
+enum GatewayEventType {
+    GATEWAY_EVENT_UNSPECIFIED = 0;
+    GATEWAY_EVENT_CONNECTED = 1;
+    GATEWAY_EVENT_DISCONNECTED = 2;
+    GATEWAY_EVENT_DEGRADED = 3;
+    GATEWAY_EVENT_RECOVERED = 4;
+}
+
+message GatewayEvent {
+    GatewayEventType type = 1;
+    string connection_id = 2;
+    string detail = 3;
+    int32 subscribed_instruments = 4;
+}
+
+enum HealthState {
+    HEALTH_UNSPECIFIED = 0;
+    HEALTH_HEALTHY = 1;
+    HEALTH_DEGRADED = 2;
+    HEALTH_FAILED = 3;
+    HEALTH_RECOVERED = 4;
+}
+
+message IntegrityEvent {
+    HealthState state = 1;
+    string detail = 2;
+    int64 open_gaps = 3;
+    int64 latest_candle_age_sec = 4;
+}
+
+// Versioned envelope: every NATS message payload is exactly one serialized Envelope.
+message Envelope {
+    uint32 schema_version = 1;   // current: 1; breaking changes bump major
+    string message_id = 2;       // deterministic where useful (JetStream dedup id)
+    string event_type = 3;
+    Exchange exchange = 4;
+    int64 instrument_id = 5;
+    string exchange_symbol = 6;
+    int64 exchange_timestamp_ms = 7;
+    int64 produced_at_ms = 8;
+    string trace_id = 9;
+    string source_service = 10;
+    MarketType market_type = 11;
+    string connection_id = 12;        // producing WS connection (diagnostics)
+    int64 sequence = 13;              // venue sequence/update id when meaningful
+    string source_channel = 14;       // venue channel/stream name
+    int64 local_receive_time_ms = 15; // local receive timestamp of source event
+    QualityState quality_state = 16;
+    int64 canonical_pair_id = 17;     // == instrument_id for usdt_perp pairs
+
+    oneof payload {
+        Trade trade = 20;
+        Candle candle = 21;
+        CandleBatch candle_batch = 22;
+        InstrumentEvent instrument_event = 23;
+        InstrumentSnapshot instrument_snapshot = 24;
+        RepairCommand repair_command = 25;
+        RepairResult repair_result = 26;
+        GatewayEvent gateway_event = 27;
+        IntegrityEvent integrity_event = 28;
+        BestBidAsk best_bid_ask = 29;
+        MarketTicker market_ticker = 30;
+        MarkPrice mark_price = 31;
+        IndexPrice index_price = 32;
+        FundingRate funding_rate = 33;
+        OpenInterest open_interest = 34;
+        DerivativesContext derivatives_context = 35;
+        OrderBookSnapshot order_book_snapshot = 36;
+        OrderBookDelta order_book_delta = 37;
+        GlobalUniverseSnapshot universe_snapshot = 38;
+        GlobalUniverseChange universe_change = 39;
+    }
+}

@@ -1,0 +1,39 @@
+[Unit]
+Description=AltML unified ML service (label-builder, trainer, model-registry, inference)
+Wants=network-online.target
+After=network-online.target nats-server.service postgresql.service
+# Restart attempts are unlimited. The delay increases between attempts and is
+# capped at five minutes, allowing transient dependencies time to recover.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=altml
+Group=altml
+EnvironmentFile=/etc/altml/common.env
+ExecStart=/opt/altml/bin/altml run --config /etc/altml/altml.yaml
+Restart=on-failure
+RestartSec=10
+# 10 s after the first failure, growing to 5 min over five steps.
+RestartSteps=5
+RestartMaxDelaySec=5min
+KillSignal=SIGTERM
+TimeoutStartSec=5min
+TimeoutStopSec=45
+# Liveness: the supervisor pings at half this budget; a wedged main loop is
+# killed and restarted instead of hanging silently.
+WatchdogSec=60
+# Native in-process training needs headroom above the serving footprint. The
+# trainer also self-bounds via training.max_matrix_mib and defers under load.
+MemoryMax=1536M
+CPUQuota=150%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The trainer writes immutable model directories under /var/lib/altml/models;
+# ProtectSystem=strict keeps everything else read-only.
+ReadWritePaths=/var/lib/altml
+
+[Install]
+WantedBy=multi-user.target

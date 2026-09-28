@@ -1,0 +1,159 @@
+# AltML unified service configuration.
+# Production copy: /etc/altml/altml.yaml (root:altml, 0640).
+# One file drives `altml run`, `altml train`, `altml nats-setup` and
+# `altml model-validate`.
+# ${VARS} are expanded from the environment (/etc/altml/common.env under
+# systemd); a missing variable is a startup error, never an empty default.
+
+environment: ${ALTML_ENVIRONMENT}
+log_level: ${ALTML_LOG_LEVEL}
+timezone: UTC
+instance_id: ${ALTML_INSTANCE_ID}
+nats_url: ${ALTML_NATS_URL}
+postgres_dsn: ${ALTML_POSTGRES_DSN}
+shutdown_timeout_sec: 25
+
+# Project adapter: names every external contract this instance serves.
+# The values below are the deployed Bitget defaults; omitting the whole
+# section is equivalent. Connecting another project means another config
+# file with its own subjects/roots — wire and DB formats do not change.
+project:
+  id: bitget-core
+  exchange: bitget                  # exchanges.code filter + prediction subject segment
+  objective: direction-1m
+  input:
+    stream: ALTTECH_ANALYTICS       # externally owned; validated, never created
+    # AltTech publishes venue feature vectors under alttech.feature.venue.<venue>.<symbol>.<tf>.<profile>.v1
+    # (see alttech's messaging/topology.hpp); scoping to bitget excludes the
+    # reference-venue (binance/okx/bybit) and cross-venue vectors, which use a
+    # different payload shape this service does not decode.
+    # AltTech publishes what AltML reads under two roots:
+    #   alttech.feature.>                      venue + cross-venue vectors
+    #   alttech.microfeature.venue.*.*.1m.v1   the execution venue's book/tape
+    # The 1m window is pinned: 15s/30s windows have no bar to belong to.
+    subject_filter:
+      - alttech.feature.>
+      - alttech.microfeature.venue.*.*.1m.v1
+    durable: inference-features-v4
+  output:
+    stream: ALTML_ANALYTICS         # owned by altml; consumers create durables here
+    prediction_subject_prefix: prediction.bitget   # -> prediction.bitget.<sym>.1m.<ver>
+  control:
+    stream: ALTML_CONTROL           # owned and provisioned by altml
+    subjects: ["ml.>", "evt.model.>", "cmd.model.>"]
+  dataset_root: /var/lib/altml/datasets
+  model_root: /var/lib/altml/models
+
+inference:
+  postgres_pool_size: 2
+  # Feature vectors older than this are dropped, never predicted.
+  stale_prediction_sec: 90
+  # Archive backfill pauses below this free-space threshold. Live ingestion and
+  # prediction remain available while backfill is paused.
+  min_backfill_free_disk_gb: 10
+  # Publish the newest gate-rejected econ model of a horizon with no ACTIVE one,
+  # marked quality_status=SHADOW: persisted for learning, never actionable
+  # (AltStrategy's economic policy refuses to act on it).
+  serve_shadow_models: true
+
+label_builder:
+  postgres_pool_size: 2
+  cycle_interval_sec: 60
+  max_bars_per_cycle: 5000
+  econ_max_bars_per_cycle: 20000    # econ-labels (15m/1h/4h) per cycle; steady state writes ~27 per minute, raise for a first backfill
+  fee_model_version: 1
+  revision_audit_interval_sec: 3600
+
+model_registry:
+  postgres_pool_size: 1
+  poll_interval_sec: 30
+
+# Native in-process trainer: the model trains INSIDE the service binary — no
+# Python, no external jobs, no timers. First start bootstraps from whatever
+# labeled history PostgreSQL already holds; afterwards it re-trains on a
+# rolling window (continual learning without overfitting: purged walk-forward,
+# embargoed early stopping, champion-challenger promotion). `altml train`
+# runs one manual cycle for diagnostics/CI.
+training:
+  enabled: true
+  # ML-first: one multiclass LightGBM per horizon on econ-labels (SHORT /
+  # NEUTRAL / LONG against the all-in round trip), temperature-calibrated.
+  mode: econ
+  econ_horizons: [15m, 1h, 4h]
+  # Feature inputs and horizons are explicit. Source identities and the
+  # feature recipe are recorded with each trained model.
+  econ_sources: ["1:15m:60", "1:1h:180"]
+  econ_min_holdout_t: 2.0           # day-clustered t of holdout net return to promote
+  econ_time_budget_sec: 1500        # boosting budget per horizon
+  # Cost model v2 (econ_logic.hpp): fee from altml.fee_models (both legs taker),
+  # the Bitget book spread OBSERVED at T0 (bitget_micro book_spread_bps), impact
+  # an explicit per-side assumption; the fallback spread where no reading exists.
+  econ_impact_bps_per_side: 1.0
+  econ_fallback_spread_bps: 2.0
+  bootstrap_if_no_active: true      # train immediately when no ACTIVE model
+  auto_promote: true                # false = stop at APPROVED, wait for operator
+  interval_hours: 168               # scheduled re-train cadence (weekly)
+  start_hour_utc: 3                 # -1 = any hour
+  retry_minutes: 60                 # back-off between attempts
+  lookback_days: 30                 # rolling training window; must fit within retention minimum_keep.
+  sample_every_minutes: 5           # auto-coarsened if max_rows would overflow
+  max_rows: 1000000
+  min_rows: 50000                   # below this: defer, stay READY_NO_ACTIVE_MODELS
+  folds: 4
+  embargo_minutes: 30               # >= max label horizon
+  validation_fraction: 0.15
+  # Regularisation and early-stopping settings for the forecast models.
+  learning_rate: 0.03
+  num_leaves: 15
+  min_data_in_leaf: 500
+  max_iterations: 1500
+  early_stopping_rounds: 100
+  threads: 2
+  time_budget_sec: 2400
+  # Sized against the FULL matrix width, aligned block included: 995 published
+  # columns + 72 (six talib-core sources x 12 projected) + 180 (reference_lite
+  # for four venues) + 37 (cross-venue consensus) + 26 (bitget microstructure)
+  # + 33 (reference_lite_micro for three information venues) = 1343. At 1100 the
+  # row cap lands at 53678, close enough to min_rows (50000) that one more
+  # source would push a cycle into "not enough rows"; 1200 leaves room.
+  max_matrix_mib: 1200
+  # Cost model v2 components (see altstrategy engine/cost_model.hpp and
+  # db/migrations/0005 there — one definition across the pipeline, aggregated
+  # differently here because this labels BARS, not plans, so there is no entry
+  # type and no per-plan book reading to attach a cost to).
+  #
+  #   fees      taker 0.0006 x 2 legs = 12.0 bps, from altml.fee_models v1.
+  #             A bar has no entry type, so the taker leg is assumed on both
+  #             sides -- the conservative half of the maker/taker pair.
+  #   slippage  configured spread-crossing plus depth-impact estimate.
+  # The estimate is fixed per label build; AltStrategy calculates costs for
+  # each plan from its point-in-time market context. Changing this label model
+  # requires a new label specification version.
+  conviction_quantile: 0.8
+  min_trades: 50
+  min_profit_factor: 1.05
+  max_drawdown: 0.10
+  min_mean_fold_auc: 0.50
+  min_positive_folds: 3
+  # Defer training above this one-minute system load. Live inference has
+  # priority over training.
+  max_load_average: 12.0
+  min_free_mem_mib: 512
+  # A run writes a dataset's worth of temporary files and WAL. Below this much
+  # free space on the database's filesystem it is deferred like other resource
+  # pressure. The threshold should reflect the database host's storage budget.
+  min_free_disk_gb: 20
+
+# ---------------------------------------------------------------------------
+# Database size budget and retention (enforced by the storage-guard
+# component). AltML owns exactly its own `altml` schema/database and only
+# ever drops within it; AltSpotter/AltTech data is read-only through
+# postgres_fdw and is never touched here. Per-table target/minimum retention
+# lives in altml.retention_policies in db/schema.sql. Retention must cover the
+# configured training lookback. Retired model artifacts are capped by count.
+storage:
+  # Example capacity for this service. Adjust to the host allocation.
+  pg_soft_budget_gb: 60
+  pg_hard_limit_gb: 66
+  check_interval_sec: 300
+  retired_model_keep_count: 5

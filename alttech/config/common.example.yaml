@@ -1,0 +1,8 @@
+# Shared parameters. Production copy: /etc/alttech/common.yaml (root:alttech, 0640).
+# ${VAR} values are expanded from the environment (/etc/alttech/common.env).
+environment: ${ALTTECH_ENVIRONMENT}
+log_level: ${ALTTECH_LOG_LEVEL}
+timezone: UTC
+instance_id: ${ALTTECH_INSTANCE_ID}
+nats_url: ${ALTTECH_NATS_URL}
+postgres_dsn: ${ALTTECH_POSTGRES_DSN}

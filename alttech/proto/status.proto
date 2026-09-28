@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package alttech.v1;
+
+import "common.proto";
+
+enum AnalyticsModule {
+    ANALYTICS_MODULE_UNSPECIFIED = 0;
+    ANALYTICS_MODULE_FEATURE = 1;
+    ANALYTICS_MODULE_MICROSTRUCTURE = 2;
+    ANALYTICS_MODULE_STRUCTURE = 3;
+    ANALYTICS_MODULE_REGIME = 4;
+}
+
+enum ModuleStatusKind {
+    MODULE_STATUS_UNSPECIFIED = 0;
+    MODULE_STATUS_READY = 1;
+    MODULE_STATUS_RECOMPUTED = 2;
+    MODULE_STATUS_DEGRADED = 3;
+    MODULE_STATUS_FAILED = 4;
+}
+
+message StatusEvent {
+    AnalyticsModule module = 1;
+    ModuleStatusKind status = 2;
+    optional Timeframe timeframe = 3;
+    int64 observed_at_ms = 4;
+    string detail = 5;
+}

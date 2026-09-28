@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package altspotter.v1;
+
+import "common.proto";
+
+// ---------------------------------------------------------------------------
+// Multi-venue market-data payloads (four USDT-perpetual futures venues).
+// All decimals are exact fixed-point (common.proto Decimal); absent optional
+// fields mean NOT_AVAILABLE — consumers must never interpret zeros as data.
+// ---------------------------------------------------------------------------
+
+// Best bid/ask derived from the venue's live order book.
+message BestBidAsk {
+    Decimal bid_price = 1;
+    Decimal bid_size = 2;
+    Decimal ask_price = 3;
+    Decimal ask_size = 4;
+}
+
+// 24h rolling ticker as published by the venue.
+message MarketTicker {
+    Decimal last_price = 1;
+    optional Decimal open_24h = 2;
+    optional Decimal high_24h = 3;
+    optional Decimal low_24h = 4;
+    optional Decimal base_volume_24h = 5;
+    optional Decimal quote_volume_24h = 6;  // turnover, USDT
+    optional Decimal bid_price = 7;
+    optional Decimal ask_price = 8;
+}
+
+message MarkPrice {
+    Decimal price = 1;
+}
+
+message IndexPrice {
+    Decimal price = 1;
+}
+
+message FundingRate {
+    Decimal rate = 1;                 // current/predicted rate for the interval
+    int64 next_funding_time_ms = 2;   // 0 = unknown
+    int32 interval_hours = 3;         // 0 = unknown
+}
+
+message OpenInterest {
+    optional Decimal base = 1;   // open interest in base units
+    optional Decimal quote = 2;  // open interest value in USDT
+}
+
+// Compact per-minute derivatives context (one row per venue+instrument+minute).
+// source_mask bit flags: 1 mark, 2 index, 4 funding, 8 open interest, 16 bbo,
+// 32 ticker/turnover.
+message DerivativesContext {
+    int64 open_time_ms = 1;
+    optional Decimal mark_price = 2;
+    optional Decimal index_price = 3;
+    optional Decimal funding_rate = 4;
+    int64 next_funding_time_ms = 5;
+    optional Decimal open_interest_base = 6;
+    optional Decimal open_interest_quote = 7;
+    optional Decimal best_bid = 8;
+    optional Decimal best_ask = 9;
+    optional Decimal turnover_24h = 10;
+    uint32 source_mask = 11;
+}
+
+message BookLevel {
+    Decimal price = 1;
+    Decimal size = 2;
+}
+
+// Bounded top-depth snapshot of the reconstructed local book (best-first).
+message OrderBookSnapshot {
+    repeated BookLevel bids = 1;
+    repeated BookLevel asks = 2;
+    int64 sequence = 3;          // venue update id / seqId at snapshot time
+    int64 exchange_time_ms = 4;
+    int32 depth = 5;             // levels captured per side
+    bool is_snapshot = 6;        // always true here
+    sint64 checksum = 7;         // venue checksum when available (OKX crc32), else 0
+}
+
+// Incremental book update as received (size 0 deletes the level).
+message OrderBookDelta {
+    repeated BookLevel bids = 1;
+    repeated BookLevel asks = 2;
+    int64 first_update_id = 3;   // Binance U; 0 when not applicable
+    int64 sequence = 4;          // Binance u / Bybit u / OKX seqId
+    int64 previous_sequence = 5; // Binance pu / OKX prevSeqId; 0 when n/a
+    int64 exchange_time_ms = 6;
+    sint64 checksum = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Global observation universe (four-venue intersection of the configured pairs)
+// ---------------------------------------------------------------------------
+
+message UniverseVenueState {
+    Exchange exchange = 1;
+    bool listed = 2;             // linear USDT perpetual exists on the venue
+    bool active = 3;             // status allows public trading
+    string exchange_symbol = 4;  // venue symbol when listed
+    string detail = 5;
+}
+
+message UniversePairState {
+    int64 canonical_pair_id = 1;  // == instrument_id of the canonical pair
+    string base_asset = 2;
+    string quote_asset = 3;
+    bool eligible = 4;            // present and active on all four venues
+    string status = 5;            // ELIGIBLE_ALL_VENUES / MISSING_ON_* / ...
+    string reason = 6;
+    repeated UniverseVenueState venues = 7;
+}
+
+message GlobalUniverseSnapshot {
+    int64 computed_at_ms = 1;
+    repeated UniversePairState pairs = 2;
+}
+
+message GlobalUniverseChange {
+    UniversePairState pair = 1;
+    string previous_status = 2;
+}

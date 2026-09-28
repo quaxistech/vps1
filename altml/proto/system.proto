@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package altml.v1;
+
+import "common.proto";
+import "feature.proto";
+import "prediction.proto";
+
+// The AltML wire contract. Consuming applications compile this schema and
+// subscribe to the AltML output subjects; AltML owns feature ingestion and
+// prediction publication.
+message Envelope {
+    uint32 schema_version = 1;
+    string message_id = 2;
+    string event_type = 3;
+    Exchange exchange = 4;
+    int64 instrument_id = 5;
+    string exchange_symbol = 6;
+    int64 exchange_timestamp_ms = 7;
+    int64 produced_at_ms = 8;
+    string trace_id = 9;
+    string source_service = 10;
+
+    // Reserved for future payload families; keeps historical recordings
+    // parseable and prevents accidental tag collisions across versions.
+    reserved 20 to 28, 30, 32 to 48;
+    oneof payload {
+        FeatureVectorV1 feature_vector = 29;
+        PredictionV1 prediction = 31;
+    }
+}

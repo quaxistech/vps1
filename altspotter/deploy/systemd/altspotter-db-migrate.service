@@ -1,0 +1,26 @@
+[Unit]
+Description=altspotter PostgreSQL schema migrations (oneshot)
+After=postgresql.service network-online.target
+Requires=postgresql.service
+Before=altspotter.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=altspotter
+Group=altspotter
+EnvironmentFile=/etc/altspotter/common.env
+ExecStart=/opt/altspotter/bin/altspotter migrate --migrations /opt/altspotter/migrations
+TimeoutStartSec=300
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

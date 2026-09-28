@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+// altml.v1 — the AltML → AltStrategy prediction contract.
+//
+// Vendored field-for-field from AltML's own prediction.proto / system.proto.
+// This file describes what AltML ACTUALLY publishes, on
+// prediction.bitget.<symbol>.<tf>.<version>, and nothing else.
+//
+// It used to also carry a second, richer contract -- MarketForecast,
+// CandidateEvaluationRequest, CandidateEvaluation, PredictionOutcome,
+// LifecycleEvent and an Envelope oneof over them -- described as what
+// AltStrategy "is built to consume once AltML ships it". No service in VPS1
+// ever produced any of those messages, and no service ever answered a
+// candidate-evaluation request; the subject had no responder at all. Carrying
+// them here made a contract that was never negotiated look agreed, and let a
+// request/response path that could only ever time out survive review. They are
+// removed. When a richer contract is genuinely wanted, it gets added to
+// AltML's prediction.proto first, published by AltML, and vendored here after.
+//
+// See docs/PREDICTION_CONTRACT.md for the producer/consumer field inventory.
+package altml.v1;
+
+enum Exchange {
+    EXCHANGE_UNSPECIFIED = 0;
+    EXCHANGE_BITGET = 1;
+    EXCHANGE_BINANCE = 2;
+    EXCHANGE_OKX = 3;
+    EXCHANGE_BYBIT = 4;
+}
+
+enum Timeframe {
+    TIMEFRAME_UNSPECIFIED = 0;
+    TF_1M = 1;
+    TF_3M = 3;
+    TF_5M = 5;
+    TF_10M = 10;
+    TF_15M = 15;
+    TF_30M = 30;
+    TF_1H = 60;
+    TF_4H = 240;
+    TF_1D = 1440;
+}
+
+message PredictionV1 {
+    string prediction_id = 1;
+    Timeframe timeframe = 2;
+    int64 bar_open_time_ms = 3;
+    int64 bar_revision = 4;
+    string model_id = 5;
+    int32 model_version = 6;
+    string feature_set_version = 7;
+    double probability_up = 8;
+    double probability_down = 9;
+    optional double expected_return = 10;           // schema 2: gross E[simple return]
+    optional double probability_target_before_stop = 11;   // not produced
+    optional double expected_mfe = 12;              // long perspective
+    optional double expected_mae = 13;              // long perspective
+    optional double expected_holding_time_min = 14; // schema 2: the horizon
+    double confidence = 15;
+    string quality_status = 16;
+    int64 computed_at_ms = 17;
+    int64 latency_us = 18;
+    int32 prediction_schema_version = 19;
+    Exchange target_venue = 20;
+    bool abstain = 21;
+    // schema 2 (AltML econ models; field numbers identical to the producer)
+    int32 horizon_minutes = 22;
+    string objective = 23;
+    optional double probability_long = 24;
+    optional double probability_neutral = 25;
+    optional double probability_short = 26;
+    optional double expected_net_return_long_bps = 27;
+    optional double expected_net_return_short_bps = 28;
+    optional double round_trip_cost_bps = 29;
+    string calibrator = 30;
+    string recipe_version = 31;
+    int32 aligned_missing = 32;
+    // schema 3: the versioned cost model the estimate was netted with, the
+    // model's validated policy margin, and magnitudes per side (bps)
+    string cost_model_version = 33;
+    optional double fee_bps = 34;              // round trip, both legs taker
+    optional double spread_bps = 35;           // observed at T0 (full spread)
+    optional double impact_bps = 36;           // round trip, an assumption
+    bool spread_observed = 37;                 // false: fallback assumption used
+    optional double policy_margin_bps = 38;    // absent: no validated margin
+    string policy_version = 39;
+    optional double favorable_long_bps = 40;   // E[max favourable excursion]
+    optional double adverse_long_bps = 41;     // E[max adverse excursion], <= 0
+    optional double favorable_short_bps = 42;
+    optional double adverse_short_bps = 43;
+    // schema 4: market-prediction semantics (VPS1 = market intelligence).
+    // The class probabilities are "probabilities" only when AltML's holdout
+    // calibration test passed (probability_calibrated); otherwise they are
+    // calibrated-by-intent raw scores and say so. label_definition states
+    // what up / flat / down mean; the excursions are magnitudes (>= 0) over
+    // the horizon, from a dedicated regression or from the class means
+    // (magnitude_source); model_role is ACTIVE (passed the market-quality
+    // gates) or SHADOW.
+    bool probability_calibrated = 44;
+    string label_definition = 45;
+    optional double expected_up_excursion_bps = 46;
+    optional double expected_down_excursion_bps = 47;
+    string magnitude_source = 48;
+    string calibration_version = 49;
+    string model_role = 50;
+}
+
+message PredictionEnvelope {
+    uint32 schema_version = 1;
+    string message_id = 2;
+    string event_type = 3;
+    Exchange exchange = 4;
+    int64 instrument_id = 5;
+    string exchange_symbol = 6;
+    int64 exchange_timestamp_ms = 7;
+    int64 produced_at_ms = 8;
+    string trace_id = 9;
+    string source_service = 10;
+    PredictionV1 prediction = 31;
+}

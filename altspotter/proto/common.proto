@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package altspotter.v1;
+
+// Exact fixed-point decimal: value = mantissa * 10^(-scale).
+// Bitget decimal strings are parsed digit-by-digit; binary floating point is never involved.
+message Decimal {
+    sint64 mantissa = 1;
+    int32 scale = 2; // 0..18
+}
+
+// Venue identity. Numeric values match PostgreSQL exchanges.id.
+// EXCHANGE_BINANCE denotes Binance USDS-M futures (code binance_usdm);
+// spot markets are intentionally out of scope for this platform.
+enum Exchange {
+    EXCHANGE_UNSPECIFIED = 0;
+    EXCHANGE_BITGET = 1;
+    EXCHANGE_BINANCE = 2;
+    EXCHANGE_OKX = 3;
+    EXCHANGE_BYBIT = 4;
+}
+
+// Market segment of a venue. All four supported venues are USDT-margined
+// linear perpetuals; the enum exists so consumers can distinguish market
+// types if ever extended (additive only).
+enum MarketType {
+    MARKET_TYPE_UNSPECIFIED = 0;
+    MARKET_TYPE_USDT_PERP = 1;
+}
+
+// Live data-quality state of a stream/field. NOT_AVAILABLE = the venue did not
+// deliver the value (do not interpret zeros); NOT_APPLICABLE = the field does
+// not exist for this market type.
+enum QualityState {
+    QUALITY_STATE_UNSPECIFIED = 0;
+    QUALITY_STATE_VALID = 1;
+    QUALITY_STATE_DEGRADED = 2;
+    QUALITY_STATE_STALE = 3;
+    QUALITY_STATE_DESYNCED = 4;
+    QUALITY_STATE_NOT_AVAILABLE = 5;
+    QUALITY_STATE_NOT_APPLICABLE = 6;
+}
+
+// Enum value == interval length in minutes.
+enum Timeframe {
+    TIMEFRAME_UNSPECIFIED = 0;
+    TF_1M = 1;
+    TF_5M = 5;
+    TF_15M = 15;
+    TF_30M = 30;
+    TF_1H = 60;
+    TF_4H = 240;
+    TF_1D = 1440;
+}
+
+enum CandleSource {
+    CANDLE_SOURCE_UNSPECIFIED = 0;
+    CANDLE_SOURCE_WS = 1;
+    CANDLE_SOURCE_REST_BOOTSTRAP = 2;
+    CANDLE_SOURCE_REST_RECONCILE = 3;
+    CANDLE_SOURCE_REST_REPAIR = 4;
+    CANDLE_SOURCE_AGGREGATION = 5;
+}
+
+enum QualityStatus {
+    QUALITY_UNSPECIFIED = 0;
+    QUALITY_OK = 1;
+    QUALITY_INCOMPLETE = 2;
+    QUALITY_SUSPECT = 3;
+}

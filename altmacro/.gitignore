@@ -1,0 +1,4 @@
+build/
+vps1.md
+*.env
+config/*.local.yaml

@@ -1,0 +1,25 @@
+[Unit]
+Description=AltTech partition maintenance and retention
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=alttech
+Group=alttech
+EnvironmentFile=/etc/alttech/common.env
+# Roll the daily partitions forward, then enforce retention and the storage
+# budget. Both act only on the alttech schema.
+ExecStart=/opt/alttech/bin/alttech-schema --ensure-partitions
+ExecStart=/opt/alttech/bin/alttech-analytics retention-run --apply --config /etc/alttech/alttech.yaml
+ExecStart=/opt/alttech/bin/alttech-analytics storage-inspect --record --config /etc/alttech/alttech.yaml
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
