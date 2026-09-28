@@ -20,5 +20,6 @@ See [`altspotter/docs/vps1/VPS1_ARCHITECTURE.md`](altspotter/docs/vps1/VPS1_ARCH
 for the cross-service architecture. Build and deployment instructions live in
 each service directory.
 
-Build outputs, release archives, per-host `vps1.md` target files, and local
-credential files are excluded from this repository.
+Build outputs and release archives are excluded. Per-host `vps1.md` target
+files and the machine-local `altsecrets/` directory are also ignored; keep
+credentials and workstation notes there, outside Git history.

@@ -4,6 +4,7 @@
 **/runtime/
 
 # Local deployment targets and credentials
+/altsecrets/
 **/vps1.md
 **/vps.md
 **/.env
