@@ -91,6 +91,26 @@ TEST_CASE("SHORT geometry mirrors: stop > entry > target") {
     }
 }
 
+TEST_CASE("tick-collapsed plan distances describe the final price geometry", "[plan][regression]") {
+    const auto ctx = make_ctx(100.0);
+    PlanConfig cfg;
+    cfg.tick_size = 10.0; // Synthetic coarse grid collapses both initial barriers.
+    for (const auto side : {Side::long_, Side::short_}) {
+        auto c = long_candidate(ctx);
+        c.side = side;
+        const auto plans = generate_plans(c, ctx, 2'000'000, cfg);
+        REQUIRE(plans.size() == 3);
+        for (const auto& p : plans) {
+            REQUIRE(p.entry_price > 0.0);
+            CHECK(p.target_distance_bps == Catch::Approx(std::abs(p.take_profit_price - p.entry_price) / p.entry_price * 10000.0));
+            CHECK(p.stop_distance_bps == Catch::Approx(std::abs(p.stop_loss_price - p.entry_price) / p.entry_price * 10000.0));
+            CHECK(p.stop_distance_atr == Catch::Approx(std::abs(p.stop_loss_price - p.entry_price) / ctx.bitget_features.get("atr_14")));
+            CHECK(p.target_distance_bps > 0.0);
+            CHECK(p.stop_distance_bps > 0.0);
+        }
+    }
+}
+
 TEST_CASE("a signal with a complete ACTIVE prediction is NORMAL; VPS1 recommends nothing for execution",
           "[proposal][vps1][regression]") {
     auto ctx = make_ctx(100.0);

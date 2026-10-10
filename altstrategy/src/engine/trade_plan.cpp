@@ -185,8 +185,6 @@ std::vector<TradePlanVariant> generate_plans(const StrategyCandidate& c, const D
         // Stop.
         const double stop_dist = base_stop_dist * pr.stop_mult;
         v.stop_loss_price = round_to_tick(v.entry_price - dir * stop_dist, cfg.tick_size);
-        v.stop_distance_bps = std::abs(v.entry_price - v.stop_loss_price) / v.entry_price * 10000.0;
-        v.stop_distance_atr = atr > 0 ? std::abs(v.entry_price - v.stop_loss_price) / atr : 0;
         v.stop_basis = inval_dist >= atr * 0.8 ? "strategy_invalidation" : "atr_buffer";
         if (ml_mae > inval_dist && ml_mae >= atr * 0.8) v.stop_basis = "ml_mae";
         v.invalidation_reason = c.reason_codes.empty() ? "" : c.reason_codes.front();
@@ -201,7 +199,6 @@ std::vector<TradePlanVariant> generate_plans(const StrategyCandidate& c, const D
         if (ml_mfe_dist > 0 && (tbasis == "rr_target")) { target_dist = ml_mfe_dist * pr.target_mult; tbasis = "ml_mfe"; }
         if (hint_target_dist > 0 && tbasis == "rr_target") target_dist = hint_target_dist * pr.target_mult;
         v.take_profit_price = round_to_tick(v.entry_price + dir * target_dist, cfg.tick_size);
-        v.target_distance_bps = std::abs(v.take_profit_price - v.entry_price) / v.entry_price * 10000.0;
         v.target_basis = tbasis;
 
         // Preserve price-side invariants (§13). If tick rounding collapsed an
@@ -214,6 +211,10 @@ std::vector<TradePlanVariant> generate_plans(const StrategyCandidate& c, const D
             if (v.stop_loss_price <= v.entry_price) v.stop_loss_price = v.entry_price + tick;
             if (v.take_profit_price >= v.entry_price) v.take_profit_price = v.entry_price - tick;
         }
+        // Distances describe the final prices, including a one-tick nudge.
+        v.stop_distance_bps = std::abs(v.entry_price - v.stop_loss_price) / v.entry_price * 10000.0;
+        v.stop_distance_atr = atr > 0 ? std::abs(v.entry_price - v.stop_loss_price) / atr : 0;
+        v.target_distance_bps = std::abs(v.take_profit_price - v.entry_price) / v.entry_price * 10000.0;
         const double risk = std::abs(v.entry_price - v.stop_loss_price);
         v.expected_rr = risk > 0 ? std::abs(v.take_profit_price - v.entry_price) / risk : 0;
 
