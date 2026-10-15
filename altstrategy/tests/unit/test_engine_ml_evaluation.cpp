@@ -18,8 +18,8 @@ MarketForecastView good() {
     f.p_down = 0.39;
     f.probability_target_before_stop = 0.57;
     f.expected_return = 0.0042;
-    f.expected_mfe = 0.0090;
-    f.expected_mae = 0.0031;
+    f.expected_mfe_long_fraction = 0.0090;
+    f.expected_mae_long_fraction = 0.0031;
     f.expected_holding_time_min = 95;
     f.conviction = 0.44;
     f.quality_status = "VALID";
@@ -64,8 +64,8 @@ TEST_CASE("a real forecast reaches the evaluation unmodified") {
     CHECK_THAT(ml.p_down, WithinAbs(0.39, 1e-12));
     CHECK_THAT(ml.p_target_before_stop, WithinAbs(0.57, 1e-12));
     CHECK_THAT(ml.expected_net_return, WithinAbs(0.0042, 1e-12));
-    CHECK_THAT(ml.expected_mfe, WithinAbs(0.0090, 1e-12));
-    CHECK_THAT(ml.expected_mae, WithinAbs(0.0031, 1e-12));
+    CHECK_THAT(ml.expected_mfe_long_fraction, WithinAbs(0.0090, 1e-12));
+    CHECK_THAT(ml.expected_mae_long_fraction, WithinAbs(0.0031, 1e-12));
     CHECK_THAT(ml.expected_holding_time_min, WithinAbs(95.0, 1e-12));
     CHECK_THAT(ml.conviction, WithinAbs(0.44, 1e-12));
     CHECK(ml.quality_status == "VALID");

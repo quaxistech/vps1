@@ -793,6 +793,50 @@ TEST_CASE("higher timeframes enter the context on their own keys") {
     CHECK(ctx->bitget_features.values.begin()->second == 1.0);
 }
 
+TEST_CASE("a backfilled higher-timeframe or venue bar never replaces a newer one (HISTORY-05/08)",
+          "[assembler][regression]") {
+    // The context grids and the information venues were stored last-arrival-
+    // wins. A higher grid stays admissible for max_context_age (6 h), so a
+    // re-published older bar silently replaced the current one.
+    const int64_t t0 = 10'000'000;
+    {
+        ContextAssembler a(mtf_config());
+        a.ingest_alttech(tf_message(7, 15, t0 - 15 * 60'000, 1.0f));
+        a.ingest_alttech(tf_message(7, 60, t0 - 60 * 60'000, 3.0f));
+        a.ingest_alttech(tf_message(7, 60, t0 - 120 * 60'000, 9.0f));   // the bar before, late
+        a.ingest_alttech(regime_for(7));
+        const auto ctx = a.try_build(7, t0);
+        REQUIRE(ctx.has_value());
+        REQUIRE(ctx->context_features.count(60) == 1);
+        CHECK(ctx->context_features.at(60).bar_open_time_ms == t0 - 60 * 60'000);
+        CHECK(ctx->context_features.at(60).values.begin()->second == 3.0);
+    }
+    // An information venue: a revision of the same bar replaces it, a late
+    // older bar does not.
+    for (const bool revised : {false, true}) {
+        AssemblerConfig cfg;
+        cfg.bitget_features = test_set();
+        ContextAssembler a(cfg);
+        a.ingest_alttech(bitget_message(7, std::vector<float>(5, 1.0f)));
+        a.ingest_alttech(venue_message(7, 2, 2.0f));
+        a.ingest_alttech(venue_message(7, 3, 3.0f));
+        a.ingest_alttech(venue_message(7, 4, 4.0f));
+        if (revised) a.ingest_alttech(venue_message(7, 2, 5.0f));
+        auto late = venue_message(7, 2, 7.0f);
+        late.bar_open_time_ms -= 15 * 60'000;
+        a.ingest_alttech(late);
+        ParsedAltTech reg;
+        reg.kind = AltTechKind::global_regime;
+        reg.canonical_pair_id = 7;
+        reg.regime.regime = "TREND_UP";
+        reg.regime.confidence = 0.7;
+        a.ingest_alttech(reg);
+        const auto ctx = a.try_build(7, 1'000'100);
+        REQUIRE(ctx.has_value());
+        CHECK(ctx->reference_features.at(2).values.begin()->second == (revised ? 5.0 : 2.0));
+    }
+}
+
 TEST_CASE("a higher-timeframe bar that has not closed cannot enter the context") {
     ContextAssembler a(mtf_config());
     const int64_t t0 = 10'000'000;

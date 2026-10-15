@@ -49,8 +49,9 @@ Parquet backend activates automatically where the libraries are present.
 ## Boundary
 
 AltStrategy **does not** size positions, choose leverage, check balances, place
-orders, or manage positions. `recommended_for_execution` is a recommendation,
-not final approval — a downstream risk / sizing / execution layer owns that. The only thing
+orders, or manage positions. `recommended_for_execution` is false on every
+proposal: whether to act is the downstream risk / sizing / execution layer's
+decision alone. The only thing
 AltStrategy blocks is a **technically INVALID** proposal (bad price-side
 geometry, expired context, NaN, holding > 48h, …); weak ML/quality signals are
 published as warnings, never hard-rejected.
@@ -61,8 +62,10 @@ published as warnings, never hard-rejected.
   vendored `alttech.v1` analytics and `altml.v1` forecast/evaluation contracts.
 - Storage: the AltStrategy-owned `altstrategy` PostgreSQL schema
   (`db/migrations/`). It never modifies the AltSpotter / AltTech / AltML schemas
-  (read-only inputs); it lives as its own schema inside the shared AltSpotter
-  database (the same connection also reads AltSpotter's market history tables).
+  (read-only inputs). In production it is a schema of its own `altstrategy`
+  database, which also holds the Gateway's `altsignalgateway` schema;
+  AltSpotter's market history and instrument registry are read through
+  `postgres_fdw` foreign tables ([docs/DATABASE.md](docs/DATABASE.md)).
 - **Feature sets are pinned, not guessed.** AltTech ships compact ORDERED
   vectors and states their identity on every message. `context.*_feature_set` in
   the config pins that identity (`name`, `version`, `schema_hash`,

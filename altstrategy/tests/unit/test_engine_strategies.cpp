@@ -4,6 +4,7 @@
 #include "altstrategy/engine/strategy_engine.hpp"
 #include "engine_test_helpers.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
@@ -1074,23 +1075,27 @@ TEST_CASE("one open hypothesis per pair, setup and side: a persisting state publ
           "[strategies][vps1][regression]") {
     HypothesisBook book;
     const int64_t h = 4LL * 3600 * 1000;
-    CHECK(book.admit(4, "momentum_continuation", Side::long_, 1'000'000, h));
+    const auto admit_at = [&](int64_t pair, const char* id, Side side, int64_t t) {
+        return book.admit(pair, id, side, t, h, 100.0, 1.0).admitted;
+    };
+    CHECK(admit_at(4, "momentum_continuation", Side::long_, 1'000'000));
     // The same trend on the next decision bars: the same hypothesis, still open.
-    CHECK_FALSE(book.admit(4, "momentum_continuation", Side::long_, 1'000'000 + 15 * 60'000, h));
-    CHECK_FALSE(book.admit(4, "momentum_continuation", Side::long_, 1'000'000 + h - 1, h));
+    CHECK_FALSE(admit_at(4, "momentum_continuation", Side::long_, 1'000'000 + 15 * 60'000));
+    CHECK_FALSE(admit_at(4, "momentum_continuation", Side::long_, 1'000'000 + h - 1));
     // Other pairs, other setups and the other side are other hypotheses.
-    CHECK(book.admit(5, "momentum_continuation", Side::long_, 1'000'000 + 60'000, h));
-    CHECK(book.admit(4, "trend_pullback", Side::long_, 1'000'000 + 60'000, h));
-    CHECK(book.admit(4, "momentum_continuation", Side::short_, 1'000'000 + 60'000, h));
+    CHECK(admit_at(5, "momentum_continuation", Side::long_, 1'000'000 + 60'000));
+    CHECK(admit_at(4, "trend_pullback", Side::long_, 1'000'000 + 60'000));
+    CHECK(admit_at(4, "momentum_continuation", Side::short_, 1'000'000 + 60'000));
     // Once its horizon has elapsed the state is a new statement.
-    CHECK(book.admit(4, "momentum_continuation", Side::long_, 1'000'000 + h, h));
+    CHECK(admit_at(4, "momentum_continuation", Side::long_, 1'000'000 + h));
 
     // Through the engine: the repeat is counted, not silently lost.
     StrategyEngine eng;
     auto ctx = make_ctx(100.0, "TREND_UP");
     HypothesisBook b2;
     const auto admit = [&](const std::string& id, Side side, int64_t horizon_ms) {
-        return b2.admit(ctx.canonical_pair_id, id, side, ctx.event_time_ms, horizon_ms);
+        return b2.admit(ctx.canonical_pair_id, id, side, ctx.event_time_ms, horizon_ms, ctx.last_price(), ctx.atr())
+            .admitted;
     };
     StrategyFunnel f1, f2;
     const auto first = eng.run(ctx, 1'000'100, {}, &f1, admit);
@@ -1107,6 +1112,38 @@ TEST_CASE("one open hypothesis per pair, setup and side: a persisting state publ
     for (const auto& [r, n] : c2.ineligible) inel += n;
     CHECK(inel + c2.no_setup + c2.geometry_rejected + c2.horizon_refused + c2.repeat_within_horizon +
               c2.candidates == c2.contexts);
+}
+
+TEST_CASE("an open hypothesis survives a restart, and the reset before a repeat is measured, not acted on",
+          "[strategies][vps1][design-04]") {
+    const int64_t h = 60LL * 60 * 1000;
+    // Restored from the archive: a setup inside its horizon is still a repeat.
+    HypothesisBook book;
+    book.restore(4, "vwap_reclaim_continuation", Side::long_, 1'000'000 + h, 100.0, 2.0);
+    CHECK_FALSE(book.admit(4, "vwap_reclaim_continuation", Side::long_, 1'000'000 + 60'000, h, 100.0, 2.0).admitted);
+    CHECK(book.admit(4, "vwap_reclaim_continuation", Side::long_, 1'000'000 + h, h, 100.0, 2.0).admitted);
+    // An older restore never shortens what is already known to be open.
+    book.restore(4, "vwap_reclaim_continuation", Side::long_, 1'000'000, 100.0, 2.0);
+    CHECK_FALSE(book.admit(4, "vwap_reclaim_continuation", Side::long_, 1'000'000 + h + 60'000, h, 100.0, 2.0).admitted);
+
+    // Reset depth: how far price went AGAINST the hypothesis after it opened.
+    HypothesisBook b;
+    CHECK(b.admit(7, "donchian_breakout_continuation", Side::long_, 0, h, 100.0, 2.0).reset_atr < 0);
+    b.observe(7, 101.0);   // with the long: no reset
+    b.observe(7, 97.0);    // 3.0 against it = 1.5 ATR
+    b.observe(7, 99.0);
+    const auto again = b.admit(7, "donchian_breakout_continuation", Side::long_, 60'000, h, 99.0, 2.0);
+    CHECK_FALSE(again.admitted);   // the book still says repeat: measurement changes nothing
+    CHECK(again.reset_atr == Catch::Approx(1.5));
+    CHECK(reset_bucket(again.reset_atr) == 2);
+    // A short is reset by a rise.
+    CHECK(b.admit(7, "donchian_breakout_continuation", Side::short_, 0, h, 100.0, 2.0).admitted);
+    b.observe(7, 100.5);
+    CHECK(b.admit(7, "donchian_breakout_continuation", Side::short_, 60'000, h, 100.0, 2.0).reset_atr ==
+          Catch::Approx(0.25));
+    CHECK(reset_bucket(0.0) == 0);
+    CHECK(reset_bucket(0.5) == 1);
+    CHECK(reset_bucket(2.0) == 3);
 }
 
 TEST_CASE("a lopsided book means one side holds at least twice the other's depth",

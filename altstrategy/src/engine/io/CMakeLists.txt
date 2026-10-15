@@ -11,6 +11,7 @@ add_library(altstrategy_engine_io STATIC
     snapshot_exporter.cpp
     context_replay.cpp
     maintenance_scheduler.cpp
+    outbox_publisher.cpp
     decision_engine.cpp)
 
 target_include_directories(altstrategy_engine_io PUBLIC include)

@@ -106,8 +106,8 @@ void fill_forecast(pbv1::MarketForecastView* mf, const MarketForecastView& v) {
     mf->set_prediction_id(v.prediction_id);
     mf->set_expected_return(v.expected_return);
     mf->set_probability_target_before_stop(v.probability_target_before_stop);
-    mf->set_expected_mfe(v.expected_mfe);
-    mf->set_expected_mae(v.expected_mae);
+    mf->set_expected_mfe(v.expected_mfe_long_fraction);
+    mf->set_expected_mae(v.expected_mae_long_fraction);
     mf->set_expected_holding_time_min(v.expected_holding_time_min);
     mf->set_conviction(v.conviction);
     mf->set_quality_status(v.quality_status);
@@ -360,8 +360,8 @@ std::optional<ParsedForecast> parse_altml_forecast(std::string_view bytes) {
     v.p_down = f.probability_down();
     v.expected_return = f.expected_return();
     v.probability_target_before_stop = f.probability_target_before_stop();
-    v.expected_mfe = f.expected_mfe();
-    v.expected_mae = f.expected_mae();
+    v.expected_mfe_long_fraction = f.expected_mfe();
+    v.expected_mae_long_fraction = f.expected_mae();
     v.expected_holding_time_min = f.expected_holding_time_min();
     v.conviction = f.confidence();
     v.quality_status = f.quality_status();
@@ -401,10 +401,16 @@ std::optional<ParsedForecast> parse_altml_forecast(std::string_view bytes) {
                 v.policy_margin_bps = f.policy_margin_bps();
             }
             v.policy_version = f.policy_version();
-            v.favorable_long_bps = f.favorable_long_bps();
-            v.adverse_long_bps = f.adverse_long_bps();
-            v.favorable_short_bps = f.favorable_short_bps();
-            v.adverse_short_bps = f.adverse_short_bps();
+            v.has_side_bps = f.has_favorable_long_bps() && f.has_adverse_long_bps() &&
+                             f.has_favorable_short_bps() && f.has_adverse_short_bps() &&
+                             std::isfinite(f.favorable_long_bps()) && std::isfinite(f.adverse_long_bps()) &&
+                             std::isfinite(f.favorable_short_bps()) && std::isfinite(f.adverse_short_bps());
+            if (v.has_side_bps) {
+                v.favorable_long_bps = f.favorable_long_bps();
+                v.adverse_long_bps = f.adverse_long_bps();
+                v.favorable_short_bps = f.favorable_short_bps();
+                v.adverse_short_bps = f.adverse_short_bps();
+            }
         }
         if (f.prediction_schema_version() >= 4) {
             v.probability_calibrated = f.probability_calibrated();

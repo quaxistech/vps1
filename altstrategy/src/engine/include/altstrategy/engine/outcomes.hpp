@@ -11,6 +11,7 @@
 
 #include "altstrategy/engine/decision_types.hpp"
 
+#include <utility>
 #include <vector>
 
 namespace altstrategy::engine {
@@ -79,10 +80,58 @@ struct OutcomeGeometry {
 
 // Reconstruct the outcome from `bars` (must cover created_at..time_stop). The
 // source records which precision tier produced the path (drives ambiguity).
+//
+// EVALUATOR VERSION 1, frozen: every market_outcomes row written before
+// evaluator_version existed was produced by it, and it is kept exactly as it
+// ran so those rows can be reproduced (QUALITY-05). It is optimistic in ways
+// version 2 is not: a stop entry fills at its trigger even through a gap, a
+// limit fills on a mere touch, the entry bar is re-scanned for exits it may
+// have preceded, two barriers inside one sub-minute bar are ordered by their
+// distance from the bar's open, and gaps inside the path go unnoticed.
 [[nodiscard]] MarketOutcome reconstruct_outcome(const OutcomeGeometry& g,
                                                 const std::vector<PathBar>& bars, OutcomePath source,
                                                 const std::string& candidate_id,
                                                 const std::string& signal_proposal_id, int64_t now_ms);
+
+// ---------------------------------------------------------------- version 2
+
+inline constexpr int kOutcomeEvaluatorVersion = 2;
+inline constexpr const char* kOutcomeFillModel = "conservative-1";
+
+// A price path and what is known about its completeness.
+struct PricePath {
+    std::vector<PathBar> bars;            // ascending open_ms
+    OutcomePath source = OutcomePath::m1_candles;
+    int64_t bar_ms = 60'000;              // one bar's span: 1 000 (trade buckets) or 60 000 (candles)
+    // Intervals [from, to) the source should have covered and did not: a
+    // missing candle, or a minute whose candle traded with no raw trade.
+    std::vector<std::pair<int64_t, int64_t>> gaps;
+    // The end of the range the source vouches for, gaps aside. Trade buckets
+    // are sparse -- a quiet tape prints nothing for a while -- so the last bar
+    // does not mark where coverage ends. 0: the last bar's end does.
+    int64_t covered_until_ms = 0;
+};
+
+// QUALITY-04. The same plan geometry resolved without the optimism of
+// version 1 -- every assumption is the one that cannot flatter the plan:
+//   * stop entries fill at the trigger, or at the bar's open when it gapped
+//     beyond it; market entries at the first bar's open -- the first print,
+//     however late: a market order takes the book, it is never "not reached";
+//   * a limit (entry or target) fills only when price traded THROUGH it --
+//     a touch proves nothing about the queue;
+//   * a protective stop exits at its level, or at the open it gapped past;
+//   * in the entry bar an exit counts only where the entry mechanics prove it
+//     came after the fill; otherwise, and whenever both barriers lie in one
+//     bar at any resolution, the outcome is AMBIGUOUS -- never ordered by a
+//     heuristic;
+//   * a gap in the path before resolution, or a path ending early, is
+//     DATA_INCOMPLETE; the time stop exits at the close of the last bar that
+//     ENDED by it -- the last price observable at the time stop;
+//   * MFE/MAE count only excursions provably after the fill.
+// `resolution` on the result says which rule decided it.
+[[nodiscard]] MarketOutcome reconstruct_outcome_v2(const OutcomeGeometry& g, const PricePath& path,
+                                                   const std::string& candidate_id,
+                                                   const std::string& signal_proposal_id, int64_t now_ms);
 
 // Compare a selected outcome against counterfactual candidate outcomes (§20):
 // fills ranking_regret (best hindsight net return minus selected) and marks the

@@ -33,6 +33,11 @@ namespace {
 
 constexpr int64_t kMiB = 1024LL * 1024;
 constexpr int64_t kDefaultOutputStreamMaxBytes = 256LL * kMiB;
+// The stream drops a repeated Nats-Msg-Id only inside this window, and the
+// service's outbox retries an unacknowledged message for up to
+// publication.max_age_hours (24): a publish whose ack was lost and that is
+// retried later than the window would otherwise be stored twice.
+constexpr int64_t kOutputDuplicateWindowNs = 24LL * 3600 * 1000 * 1000 * 1000;
 
 bool ensure_stream(jsCtx* js, const char* name, const std::vector<const char*>& subjects,
                    int64_t max_age_ns, int64_t max_bytes, int64_t dup_window_ns) {
@@ -287,7 +292,7 @@ int main(int argc, char** argv) {
     ok = ensure_stream(js, output_stream.c_str(),
                        {"strategy.>", "tradeplan.>", "tradeproposal.>", "signal.>",
                         "archive.snapshot.>"},
-                       30 * kDay, output_stream_max_bytes, 2LL * 60 * 1000 * 1000 * 1000) && ok;
+                       30 * kDay, output_stream_max_bytes, kOutputDuplicateWindowNs) && ok;
 
     jsCtx_Destroy(js);
     natsConnection_Close(conn);

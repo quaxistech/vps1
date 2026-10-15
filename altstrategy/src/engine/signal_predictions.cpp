@@ -1,6 +1,7 @@
 #include "altstrategy/engine/signal_predictions.hpp"
 
 #include "altstrategy/engine/forecast_checks.hpp"
+#include "altstrategy/engine/units.hpp"
 
 #include <cmath>
 
@@ -33,13 +34,19 @@ HorizonPrediction horizon_prediction(const DecisionContext& ctx, int32_t horizon
     h.p_up = f.p_long;
     h.p_flat = f.p_neutral;
     h.p_down = f.p_short;
-    h.expected_return_bps = f.expected_return * 10'000.0;
+    h.expected_return_bps = units::fraction_to_bps(f.expected_return);
     // Excursions as magnitudes (>= 0). Schema 4 publishes them directly;
     // schema 3 as the long side's favourable (>= 0) and adverse (<= 0) moves.
-    h.expected_up_excursion_bps =
-        f.has_excursions ? f.expected_up_excursion_bps : std::max(f.favorable_long_bps, 0.0);
-    h.expected_down_excursion_bps =
-        f.has_excursions ? f.expected_down_excursion_bps : std::max(-f.adverse_long_bps, 0.0);
+    // Neither: no magnitude was estimated, which is not an estimate of 0.
+    if (f.has_excursions) {
+        h.has_excursions = true;
+        h.expected_up_excursion_bps = f.expected_up_excursion_bps;
+        h.expected_down_excursion_bps = f.expected_down_excursion_bps;
+    } else if (f.has_side_bps) {
+        h.has_excursions = true;
+        h.expected_up_excursion_bps = std::max(f.favorable_long_bps, 0.0);
+        h.expected_down_excursion_bps = std::max(-f.adverse_long_bps, 0.0);
+    }
     h.cost_model_version = f.cost_model_version;
     h.cost_bps = f.round_trip_cost_bps;
     h.expected_net_long_bps = f.expected_net_long_bps;
@@ -55,6 +62,24 @@ std::vector<HorizonPrediction> market_predictions(const DecisionContext& ctx, in
     std::vector<HorizonPrediction> out;
     for (const int32_t h : kServedHorizons) out.push_back(horizon_prediction(ctx, h, now_ms, max_forecast_age_ms));
     return out;
+}
+
+const HorizonPrediction* evaluation_prediction(const StrategyCandidate& c) {
+    for (const auto& h : c.predictions)
+        if (h.horizon_minutes == c.econ.horizon_minutes) return &h;
+    return nullptr;
+}
+
+const HorizonPrediction* geometry_prediction(const StrategyCandidate& c) {
+    const auto* h = evaluation_prediction(c);
+    return h != nullptr && h->state == PredictionState::present && h->role == "ACTIVE" ? h : nullptr;
+}
+
+std::optional<SideExcursions> side_excursions(const HorizonPrediction& h, Side side) {
+    if (!h.has_excursions || (side != Side::long_ && side != Side::short_)) return std::nullopt;
+    const double up = h.expected_up_excursion_bps, down = h.expected_down_excursion_bps;
+    if (!std::isfinite(up) || !std::isfinite(down) || up < 0 || down < 0) return std::nullopt;
+    return side == Side::long_ ? SideExcursions{up, down} : SideExcursions{down, up};
 }
 
 } // namespace altstrategy::engine

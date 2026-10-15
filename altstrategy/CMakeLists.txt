@@ -87,6 +87,7 @@ add_subdirectory(tools/nats-init)
 add_subdirectory(tools/config-check)
 add_subdirectory(tools/version)
 add_subdirectory(tools/replay)
+add_subdirectory(tools/outcome-replay)
 
 if(ALTSTRATEGY_BUILD_TESTS)
     enable_testing()

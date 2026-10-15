@@ -1,7 +1,9 @@
 #include "altstrategy/engine/trade_plan.hpp"
 
 #include "altstrategy/engine/ids.hpp"
+#include "altstrategy/engine/signal_predictions.hpp"
 #include "altstrategy/engine/state_candidates.hpp"
+#include "altstrategy/engine/units.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,12 +12,30 @@ namespace altstrategy::engine {
 
 namespace {
 
-// Derive a reasonable tick from price magnitude when the instrument tick is
-// unknown (roughly one part in ~100k, clamped to a sane band).
+// A tick guessed from the price magnitude (roughly one part in 10^4..10^5,
+// clamped). Only a fallback: against the venue's own grid it is wrong by 10x
+// for most of the universe in one direction or the other (ADAUSDT trades in
+// 0.0001, this says 0.00001; BTCUSDT in 0.1, this says 1).
 double derive_tick(double price) {
     if (price <= 0) return 0.0001;
     const double mag = std::pow(10.0, std::floor(std::log10(price)) - 4.0);
     return std::clamp(mag, 1e-8, 1.0);
+}
+
+// Distances from the (on-grid) entry in whole ticks, so a LONG and its mirror
+// SHORT round identically -- rounding the absolute PRICE broke ties away from
+// zero, which put a long's target a tick further out than its mirror short's.
+// A stop rounds UP: it is sized from floors (the invalidation, 0.8 ATR,
+// min_stop_bps, the spread), and the nearest tick can sit inside them by half
+// a tick, which on a coarse grid is not small (DOTUSDT: one tick is ~9 bps).
+// The epsilon keeps a distance already on the grid where it is. Never fewer
+// than one tick: a level on the entry is no level.
+int64_t stop_ticks(double distance, double tick) {
+    constexpr double kOnGrid = 1e-9;
+    return std::max<int64_t>(1, static_cast<int64_t>(std::ceil(distance / tick - kOnGrid)));
+}
+int64_t target_ticks(double distance, double tick) {
+    return std::max<int64_t>(1, std::llround(distance / tick));
 }
 
 int64_t holding_cap(HoldingClass hc, const PlanConfig& cfg) {
@@ -26,6 +46,14 @@ int64_t holding_cap(HoldingClass hc, const PlanConfig& cfg) {
     }
 }
 
+// The expected gross return of the candidate's side, in bps, from the
+// prediction that may shape its plan; 0 without one. AltML's expected return
+// is the LONG perspective, so a short is favoured by a negative one.
+double side_expected_return_bps(const StrategyCandidate& c) {
+    const auto* h = geometry_prediction(c);
+    if (h == nullptr) return 0.0;
+    return (c.side == Side::long_ ? 1.0 : c.side == Side::short_ ? -1.0 : 0.0) * h->expected_return_bps;
+}
 
 } // namespace
 
@@ -45,12 +73,28 @@ EntryType choose_entry(const StrategyCandidate& c, const DecisionContext& ctx) {
     if (c.strategy_id == kStateStrategyId) return EntryType::market;
     if (c.strategy_family == Family::breakout || has("donchian_breakout") || has("expansion_confirmed"))
         return EntryType::stop_market;
+    // A large expected move FOR THIS SIDE. The test was |expected_return| >
+    // 0.003, so a model expecting a 30 bps fall made a LONG "strong" enough to
+    // cross the spread -- and it read any forecast present, SHADOW or not.
+    constexpr double kStrongEdgeBps = 30.0;
     const bool strong = c.raw_setup_score > 0.7 && ctx.spread_bps < 5.0 && ctx.top_depth_usdt > 50000 &&
-                        c.ml_context.present && !c.ml_context.abstain &&
-                        std::abs(c.ml_context.expected_return) > 0.003;
+                        side_expected_return_bps(c) > kStrongEdgeBps;
     if (strong && (c.strategy_family == Family::trend || c.strategy_family == Family::cross_venue))
         return EntryType::market;
     return EntryType::limit;
+}
+
+const PriceTickVersion* price_tick_at(const PriceTickTable& table, int64_t pair, int64_t t_ms) {
+    const auto it = table.find(pair);
+    if (it == table.end()) return nullptr;
+    const PriceTickVersion* best = nullptr;
+    for (const auto& v : it->second) {
+        if (v.valid_from_ms > t_ms || !(v.tick > 0)) continue;
+        if (best == nullptr || v.valid_from_ms > best->valid_from_ms ||
+            (v.valid_from_ms == best->valid_from_ms && v.version > best->version))
+            best = &v;
+    }
+    return best;
 }
 
 double round_to_tick(double price, double tick) {
@@ -99,23 +143,40 @@ std::vector<TradePlanVariant> generate_plans(const StrategyCandidate& c, const D
     const bool is_long = c.side == Side::long_;
     const double dir = is_long ? 1.0 : -1.0;
 
+    // The grid every price is placed on: the venue's at T0, else a configured
+    // one, else a guess from the price magnitude that the plan records as one.
+    const double tick = ctx.price_tick > 0 ? ctx.price_tick : cfg.tick_size > 0 ? cfg.tick_size : derive_tick(px);
+    const char* tick_source = ctx.price_tick > 0 ? "instrument_spec" : cfg.tick_size > 0 ? "config" : "derived";
+
+    // The model's expected excursions FOR THIS SIDE over the candidate's own
+    // horizon, in price units (QUALITY-01/02). Only an ACTIVE, fresh, complete
+    // prediction shapes a plan; otherwise both stay 0 and the geometry comes
+    // from structure, the strategy's own levels and ATR, as it says.
+    double ml_mae = 0, ml_mfe_dist = 0;
+    if (const auto* h = geometry_prediction(c)) {
+        if (const auto ex = side_excursions(*h, c.side)) {
+            ml_mfe_dist = units::bps_to_price_distance(px, ex->favourable_bps);
+            ml_mae = units::bps_to_price_distance(px, ex->adverse_bps);
+        }
+    }
+
     // Base stop distance from the candidate invalidation, floored by ATR/spread/
     // slippage buffers and by ML MAE (§15). Never one fixed percent for all pairs.
     const double inval_dist = std::abs(c.entry_hint - c.invalidation_hint);
-    const double spread_slip = px * (ctx.spread_bps + ctx.expected_slippage_bps) / 10000.0;
-    double ml_mae = 0;
-    if (c.ml_context.present && !c.ml_context.abstain)
-        ml_mae = std::abs(c.ml_context.expected_mae) / 10000.0 * px;   // mae quantile in bps
-    const double min_stop = std::max(px * cfg.min_stop_bps / 10000.0, spread_slip * 1.5);
+    const double spread_slip = units::bps_to_price_distance(px, ctx.spread_bps + ctx.expected_slippage_bps);
+    const double min_stop = std::max(units::bps_to_price_distance(px, cfg.min_stop_bps), spread_slip * 1.5);
     const double base_stop_dist = std::max({inval_dist, atr * 0.8, min_stop, ml_mae});
+    // Which floor set it, first in this order on a tie.
+    const char* stop_basis = base_stop_dist == inval_dist ? "strategy_invalidation"
+                             : base_stop_dist == atr * 0.8 ? "atr_buffer"
+                             : base_stop_dist == ml_mae    ? "ml_mae"
+                                                           : "min_stop_floor";
 
-    // Base target: structure zone in direction, else ML MFE, else RR target.
+    // Base target: structure zone in direction, else ML MFE, else the
+    // strategy's own target level, else a multiple of the stop.
     const std::string tgt_kind = is_long ? "resistance" : "support";
     double struct_target = 0;
     if (const auto* z = ctx.nearest_zone(tgt_kind, px)) struct_target = z->center;
-    double ml_mfe_dist = 0;
-    if (c.ml_context.present && !c.ml_context.abstain)
-        ml_mfe_dist = std::abs(c.ml_context.expected_mfe) / 10000.0 * px;
     const double hint_target_dist = std::abs(c.target_hint - c.entry_hint);
 
     struct Profile {
@@ -170,57 +231,55 @@ std::vector<TradePlanVariant> generate_plans(const StrategyCandidate& c, const D
         // deeper pullback (limit further from market against the trade direction).
         double entry = px - dir * pr.entry_offset_atr * atr;
         if (pr.forced_entry == EntryType::market) entry = px;
-        v.entry_price = round_to_tick(entry, cfg.tick_size);
+        v.tick_size = tick;
+        v.tick_source = tick_source;
+        v.geometry_version = kPlanGeometryVersion;
+        v.entry_price = round_to_tick(entry, tick);
         if (pr.forced_entry == EntryType::limit || pr.forced_entry == EntryType::stop_limit) {
             const double halfzone = atr * 0.1;
-            v.entry_lower = round_to_tick(entry - halfzone, cfg.tick_size);
-            v.entry_upper = round_to_tick(entry + halfzone, cfg.tick_size);
+            v.entry_lower = round_to_tick(entry - halfzone, tick);
+            v.entry_upper = round_to_tick(entry + halfzone, tick);
         }
         if (pr.forced_entry == EntryType::stop_market || pr.forced_entry == EntryType::stop_limit) {
             // Trigger beyond the market in the trade direction (breakout confirm).
-            v.trigger_price = round_to_tick(px + dir * atr * 0.15, cfg.tick_size);
+            v.trigger_price = round_to_tick(px + dir * atr * 0.15, tick);
             v.entry_price = v.trigger_price;
         }
 
         // Stop.
         const double stop_dist = base_stop_dist * pr.stop_mult;
-        v.stop_loss_price = round_to_tick(v.entry_price - dir * stop_dist, cfg.tick_size);
-        v.stop_basis = inval_dist >= atr * 0.8 ? "strategy_invalidation" : "atr_buffer";
-        if (ml_mae > inval_dist && ml_mae >= atr * 0.8) v.stop_basis = "ml_mae";
+        v.stop_loss_price = v.entry_price - dir * static_cast<double>(stop_ticks(stop_dist, tick)) * tick;
+        v.stop_basis = stop_basis;
         v.invalidation_reason = c.reason_codes.empty() ? "" : c.reason_codes.front();
 
-        // Target: prefer structure, then ML MFE, then a mult of stop distance.
+        // Target: prefer structure, then ML MFE, then the strategy's target,
+        // then a multiple of the stop distance. The basis names the source
+        // actually used: a strategy target used to be recorded as rr_target.
         double target_dist = stop_dist * (pr.target_mult / pr.stop_mult) * 1.6;
         std::string tbasis = "rr_target";
         if (struct_target > 0) {
             const double sd = std::abs(struct_target - v.entry_price);
             if (sd > stop_dist * 0.8) { target_dist = sd * (pr.profile == PlanProfile::conservative ? 0.85 : 1.0); tbasis = "structure_zone"; }
         }
-        if (ml_mfe_dist > 0 && (tbasis == "rr_target")) { target_dist = ml_mfe_dist * pr.target_mult; tbasis = "ml_mfe"; }
-        if (hint_target_dist > 0 && tbasis == "rr_target") target_dist = hint_target_dist * pr.target_mult;
-        v.take_profit_price = round_to_tick(v.entry_price + dir * target_dist, cfg.tick_size);
+        if (ml_mfe_dist > 0 && tbasis == "rr_target") { target_dist = ml_mfe_dist * pr.target_mult; tbasis = "ml_mfe"; }
+        if (hint_target_dist > 0 && tbasis == "rr_target") { target_dist = hint_target_dist * pr.target_mult; tbasis = "strategy_target"; }
+        // Price-side invariants (§13) hold by construction: both levels are at
+        // least one tick from the entry, on its side. A target that rounds to
+        // a single tick is reported as such by the distances below -- and by
+        // the proposal's cost diagnostic -- never widened.
+        v.take_profit_price = v.entry_price + dir * static_cast<double>(target_ticks(target_dist, tick)) * tick;
         v.target_basis = tbasis;
 
-        // Preserve price-side invariants (§13). If tick rounding collapsed an
-        // edge, nudge by one tick so stop<entry<target (long) strictly holds.
-        const double tick = cfg.tick_size > 0 ? cfg.tick_size : derive_tick(px);
-        if (is_long) {
-            if (v.stop_loss_price >= v.entry_price) v.stop_loss_price = v.entry_price - tick;
-            if (v.take_profit_price <= v.entry_price) v.take_profit_price = v.entry_price + tick;
-        } else {
-            if (v.stop_loss_price <= v.entry_price) v.stop_loss_price = v.entry_price + tick;
-            if (v.take_profit_price >= v.entry_price) v.take_profit_price = v.entry_price - tick;
-        }
-        // Distances describe the final prices, including a one-tick nudge.
-        v.stop_distance_bps = std::abs(v.entry_price - v.stop_loss_price) / v.entry_price * 10000.0;
+        // Distances describe the final prices.
+        v.stop_distance_bps = units::price_distance_to_bps(v.entry_price, v.entry_price - v.stop_loss_price);
         v.stop_distance_atr = atr > 0 ? std::abs(v.entry_price - v.stop_loss_price) / atr : 0;
-        v.target_distance_bps = std::abs(v.take_profit_price - v.entry_price) / v.entry_price * 10000.0;
+        v.target_distance_bps = units::price_distance_to_bps(v.entry_price, v.take_profit_price - v.entry_price);
         const double risk = std::abs(v.entry_price - v.stop_loss_price);
         v.expected_rr = risk > 0 ? std::abs(v.take_profit_price - v.entry_price) / risk : 0;
 
         // Fill estimate + entry timeout.
-        const double dist_bps = std::abs(v.entry_price - px) / px * 10000.0;
-        const double vol_bps = atr / px * 10000.0;
+        const double dist_bps = units::price_distance_to_bps(px, v.entry_price - px);
+        const double vol_bps = units::price_distance_to_bps(px, atr);
         // A fill estimate has to produce a number -- the entry timeout depends on
         // it -- so this is a deliberate conservative stand-in, not an observation.
         // Intensity divides the spread term in estimate_fill(), so a LOW value

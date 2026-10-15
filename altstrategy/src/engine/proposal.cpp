@@ -2,6 +2,7 @@
 #include "altstrategy/engine/cost_model.hpp"
 
 #include "altstrategy/engine/ids.hpp"
+#include "altstrategy/engine/units.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -130,6 +131,7 @@ TradeSignalProposal build_proposal(const ProposalInputs& in, int64_t now_ms) {
     s.optional_secondary_target = p.optional_secondary_target;
     s.target_basis = p.target_basis;
     s.target_distance_bps = p.target_distance_bps;
+    s.plan_geometry_version = p.geometry_version;
     s.max_holding_time_ms = p.max_holding_time_ms;
     s.time_stop_at_ms = p.time_stop_at_ms;
     s.expected_rr = p.expected_rr;
@@ -165,7 +167,7 @@ TradeSignalProposal build_proposal(const ProposalInputs& in, int64_t now_ms) {
         // and p_target_before_stop is not produced by it at all: absent, not 0.
         s.edge_estimated = true;
         s.p_target_estimated = false;
-        s.expected_net_return = c.econ.expected_net_bps / 10'000.0;
+        s.expected_net_return = units::bps_to_fraction(c.econ.expected_net_bps);
         s.ml_conviction = std::clamp(c.econ.p_side - c.econ.p_opposite, -1.0, 1.0);
         const int64_t hold = static_cast<int64_t>(c.econ.horizon_minutes) * 60'000;
         s.expected_holding_time_p50_ms = std::clamp<int64_t>(hold, 60'000, p.max_holding_time_ms);
@@ -270,6 +272,21 @@ TradeSignalProposal build_proposal(const ProposalInputs& in, int64_t now_ms) {
                     num(threshold) + unit).c_str(), sev);
     };
 
+    // QUALITY-03: whether the plan's own target can pay the cost it was priced
+    // with. A hypothesis is not refused for it -- the market event stands and
+    // is published -- but a plan that loses money even at its target is never
+    // left looking viable: TARGET_FIRST on such a plan is a net loss by
+    // construction (798 of 819 Donchian TARGET_FIRST outcomes, 2026-10-13).
+    if (!(p.target_distance_bps > s.round_trip_cost_bps))
+        warn("PLAN_TARGET_BELOW_COST",
+             ("diagnostic: target " + num(p.target_distance_bps, 1) + " bps (" + p.target_basis +
+              ") <= estimated round trip " + num(s.round_trip_cost_bps, 1) + " bps").c_str(),
+             "info");
+    // DESIGN-02: a grid guessed from the price magnitude is not the venue's.
+    if (p.tick_source == "derived")
+        warn("TICK_SIZE_DERIVED",
+             "no instrument spec at T0: prices rounded to a tick derived from the price magnitude",
+             "warning");
     if (in.ctx.data_quality == ContextQuality::degraded_3_of_4)
         warn("DEGRADED_3_OF_4", "3 of 4 venues contributed to this context", "warning");
     if (in.ctx.data_quality == ContextQuality::degraded_2_of_4)

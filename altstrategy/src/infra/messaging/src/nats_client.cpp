@@ -2,6 +2,8 @@
 
 #include "altstrategy/logging/logger.hpp"
 
+#include <chrono>
+
 namespace altstrategy::messaging {
 
 namespace {
@@ -112,6 +114,7 @@ Result<std::unique_ptr<NatsClient>> NatsClient::connect(const std::string& url,
                                           &client->shutting_down_);
     }
     if (s == NATS_OK) s = natsOptions_SetReconnectedCB(client->opts_, on_reconnected, nullptr);
+    if (s == NATS_OK) s = natsOptions_SetClosedCB(client->opts_, &NatsClient::on_closed, client.get());
     if (s == NATS_OK) s = natsOptions_SetErrorHandler(client->opts_, on_error, nullptr);
     if (s == NATS_OK) s = natsConnection_Connect(&client->conn_, client->opts_);
     if (s != NATS_OK) return std::unexpected(nats_error(s, "connect to NATS"));
@@ -125,11 +128,25 @@ Result<std::unique_ptr<NatsClient>> NatsClient::connect(const std::string& url,
     return client;
 }
 
+void NatsClient::on_closed(natsConnection* /*nc*/, void* closure) {
+    auto* self = static_cast<NatsClient*>(closure);
+    {
+        std::lock_guard<std::mutex> lk(self->closed_mu_);
+        self->closed_ = true;
+    }
+    self->closed_cv_.notify_all();
+}
+
 NatsClient::~NatsClient() {
     shutting_down_.store(true, std::memory_order_relaxed);
     if (js_ != nullptr) jsCtx_Destroy(js_);
     if (conn_ != nullptr) {
         natsConnection_Close(conn_);
+        {
+            // Bounded: a library that never calls back must not hang a stop.
+            std::unique_lock<std::mutex> lk(closed_mu_);
+            closed_cv_.wait_for(lk, std::chrono::seconds(5), [this] { return closed_; });
+        }
         natsConnection_Destroy(conn_);
     }
     if (opts_ != nullptr) natsOptions_Destroy(opts_);
@@ -142,8 +159,8 @@ Result<void> NatsClient::publish(const std::string& subject, std::string_view by
     return {};
 }
 
-Result<void> NatsClient::js_publish(const std::string& subject, std::string_view bytes,
-                                    const std::string& msg_id, int64_t timeout_ms) {
+Result<JsAck> NatsClient::js_publish(const std::string& subject, std::string_view bytes,
+                                     const std::string& msg_id, int64_t timeout_ms) {
     jsPubOptions po;
     jsPubOptions_Init(&po);
     po.MaxWait = timeout_ms;
@@ -153,12 +170,17 @@ Result<void> NatsClient::js_publish(const std::string& subject, std::string_view
     jsErrCode jerr = static_cast<jsErrCode>(0);
     const natsStatus s = js_Publish(&ack, js_, subject.c_str(), bytes.data(),
                                     static_cast<int>(bytes.size()), &po, &jerr);
-    if (ack != nullptr) jsPubAck_Destroy(ack);
+    JsAck out;
+    if (ack != nullptr) {
+        out.sequence = ack->Sequence;
+        out.duplicate = ack->Duplicate;
+        jsPubAck_Destroy(ack);
+    }
     if (s != NATS_OK) {
         return std::unexpected(nats_error(
             s, "js_publish " + subject + " (jetstream err " + std::to_string(jerr) + ")"));
     }
-    return {};
+    return out;
 }
 
 namespace {

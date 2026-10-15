@@ -1,6 +1,7 @@
 #include "altstrategy/engine/ranking.hpp"
 
 #include "altstrategy/engine/cost_model.hpp"
+#include "altstrategy/engine/signal_predictions.hpp"
 #include "altstrategy/engine/trade_plan.hpp"
 
 #include "altstrategy/engine/ids.hpp"
@@ -106,9 +107,12 @@ std::map<std::string, double> ranking_components(const StrategyCandidate& c,
         k["ml_direction"] = dir;
         const double net = c.side == Side::long_ ? ml.expected_return : -ml.expected_return;
         k["ml_net_return"] = std::tanh(net / 0.004);
-        const double mfe = std::abs(ml.expected_mfe);
-        const double mae = std::max(std::abs(ml.expected_mae), 1e-6);
-        k["ml_excursion_rr"] = std::tanh((mfe / mae - 1.0));
+        // Favourable over adverse FOR THIS SIDE. It was |mfe| / |mae| of the
+        // LONG excursions for both sides, so a short scored the long's ratio.
+        const auto* h = evaluation_prediction(c);
+        const auto ex = h != nullptr && h->has_values() ? side_excursions(*h, c.side) : std::nullopt;
+        k["ml_excursion_rr"] =
+            ex ? std::tanh(ex->favourable_bps / std::max(ex->adverse_bps, 1e-6) - 1.0) : 0.0;
         // Conviction, not uncertainty. AltML's field is |p_up - 0.5| * 2 -- a
         // transform of the probability, so HIGH means far from a coin flip.
         // The old key was named `ml_uncertainty` and fed the same number, which

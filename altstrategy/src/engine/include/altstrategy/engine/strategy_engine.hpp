@@ -10,6 +10,8 @@
 #include "altstrategy/engine/economic_policy.hpp"
 #include "altstrategy/engine/strategy.hpp"
 
+#include <algorithm>
+#include <array>
 #include <functional>
 #include <map>
 #include <tuple>
@@ -49,6 +51,14 @@ struct StrategyFunnel {
         // The same hypothesis (pair, setup, side) again inside the horizon of
         // the one already published: a persisting state, not a new event.
         int64_t repeat_within_horizon = 0;
+        // DESIGN-04 shadow measurement: how far price had retraced against
+        // the hypothesis since it was opened when the setup fired again, in
+        // ATR -- [0, 0.5), [0.5, 1), [1, 2), >= 2. Counted for repeats that
+        // were suppressed and for re-admissions after the horizon expired. A
+        // repeat after a deep reset is a candidate independent episode; one
+        // with none is the same state persisting. Gates nothing.
+        std::array<int64_t, 4> repeat_by_reset_atr{};
+        std::array<int64_t, 4> readmitted_by_reset_atr{};
         int64_t candidates = 0;
         // What the economic policy said about those candidates: a setup the
         // model says does not pay and a setup with no usable model are
@@ -69,23 +79,74 @@ struct StrategyFunnel {
 // its horizon adds no information, so it is admitted again only once that
 // horizon has elapsed. This is de-duplication of meaning, not a filter on
 // quality: the state itself is recorded every minute by AltML.
+//
+// The book is restored from the archive at startup (restore()): it used to be
+// memory only, so every restart re-issued every open hypothesis as new.
+//
+// It also measures (DESIGN-04, shadow) how far price retraced against each
+// hypothesis after it opened: the depth of the reset before the setup fired
+// again, the evidence an episode rule would need. It changes no admission.
 class HypothesisBook {
 public:
-    // true (and remembered) when no same-(pair, setup, side) hypothesis is open
-    // at `event_ms`; false while one published at t is open, t + horizon > event.
-    bool admit(int64_t pair, const std::string& strategy_id, Side side, int64_t event_ms, int64_t horizon_ms) {
+    struct Admission {
+        bool admitted = false;
+        // The retracement against the previous hypothesis of this key since it
+        // opened, in its ATR; negative when there was none to measure.
+        double reset_atr = -1;
+    };
+
+    // Price seen on a context of `pair`: the adverse extreme of every
+    // hypothesis of the pair is updated.
+    void observe(int64_t pair, double price) {
+        if (!(price > 0)) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        const auto lo = book_.lower_bound(std::make_tuple(pair, std::string(), 0));
+        for (auto it = lo; it != book_.end() && std::get<0>(it->first) == pair; ++it) {
+            const bool is_long = std::get<2>(it->first) == static_cast<int>(Side::long_);
+            Entry& e = it->second;
+            e.adverse = std::max(e.adverse, is_long ? e.ref_price - price : price - e.ref_price);
+        }
+    }
+
+    // admitted (and remembered) when no same-(pair, setup, side) hypothesis is
+    // open at `event_ms`; not admitted while one opened at t is open,
+    // t + horizon > event.
+    Admission admit(int64_t pair, const std::string& strategy_id, Side side, int64_t event_ms,
+                    int64_t horizon_ms, double price, double atr) {
         std::lock_guard<std::mutex> lk(mu_);
         const auto key = std::make_tuple(pair, strategy_id, static_cast<int>(side));
-        const auto it = open_until_.find(key);
-        if (it != open_until_.end() && event_ms < it->second) return false;
-        open_until_[key] = event_ms + horizon_ms;
-        return true;
+        Admission a;
+        const auto it = book_.find(key);
+        if (it != book_.end() && it->second.atr > 0) a.reset_atr = std::max(it->second.adverse, 0.0) / it->second.atr;
+        if (it != book_.end() && event_ms < it->second.open_until_ms) return a;
+        book_[key] = Entry{event_ms + horizon_ms, price, atr, 0};
+        a.admitted = true;
+        return a;
+    }
+
+    // A hypothesis the archive says is still open (startup).
+    void restore(int64_t pair, const std::string& strategy_id, Side side, int64_t open_until_ms,
+                 double ref_price, double atr) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& e = book_[std::make_tuple(pair, strategy_id, static_cast<int>(side))];
+        if (open_until_ms > e.open_until_ms) e = Entry{open_until_ms, ref_price, atr, 0};
     }
 
 private:
+    struct Entry {
+        int64_t open_until_ms = 0;
+        double ref_price = 0, atr = 0;
+        double adverse = 0;   // price units, against the hypothesis' side
+    };
     std::mutex mu_;
-    std::map<std::tuple<int64_t, std::string, int>, int64_t> open_until_;
+    std::map<std::tuple<int64_t, std::string, int>, Entry> book_;
 };
+
+// The bucket of a reset depth in ATR for the funnel's shadow counters:
+// [0, 0.5) -> 0, [0.5, 1) -> 1, [1, 2) -> 2, >= 2 -> 3.
+[[nodiscard]] inline size_t reset_bucket(double reset_atr) {
+    return reset_atr < 0.5 ? 0 : reset_atr < 1.0 ? 1 : reset_atr < 2.0 ? 2 : 3;
+}
 
 class StrategyEngine {
 public:

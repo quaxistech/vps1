@@ -26,6 +26,30 @@ clock — not a price target's arrival — is what pays its thesis; it is the on
 strategy in the catalogue whose horizon is set by a contractual event rather
 than by an expected move.
 
+## Four times, not one (DESIGN-01 / DESIGN-03)
+
+| time | where | what it is |
+|---|---|---|
+| event time | `DecisionContext.event_time_ms` | T0: the decision bar's close; every input must be available by it |
+| prediction horizon | the econ estimate's `horizon_minutes` (15m / 1h / 4h) | the fixed holding the model's class and expected net describe |
+| validity | `valid_until_ms`, `entry_fill_timeout_ms` | how long the proposal may still be entered |
+| holding | `max_holding_time_ms`, `time_stop_at_ms` | the plan's time stop: the strategy's declared horizon bounded by its holding class |
+
+The time stop is the holding-class bound, not the prediction horizon. Measured
+on 20 205 BALANCED proposals (2026-10-01..14, geometry 2, evaluator 2), a stop
+at 1x or 2x the hypothesis' own horizon changes nothing beyond noise
+(INTRADAY −21.7 / −22.1 against −22.6 bps net, CIs overlapping), so the rule
+stays.
+
+`expected_holding_time_p50_ms` / `_p90_ms` are **heuristics, not quantiles**.
+With an econ estimate (`edge_estimated`) both are the model horizon, clamped
+to the plan; without one they are half of and the whole declared horizon.
+Measured holding of resolved trades differs: P50 / P90 of 19 / 29 minutes for
+15m-horizon proposals published as 15 / 15, and 61 / 251 for 4h ones
+published as 240 / 240. A calibrated time-to-event estimate would change
+published values VPS2 reads as features, so it waits for an approved,
+versioned change.
+
 ## Where the ceiling is enforced
 
 1. `StrategyEngine` — refuses a candidate declaring more than the ceiling.

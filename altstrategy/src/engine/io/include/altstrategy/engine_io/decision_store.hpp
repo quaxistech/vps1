@@ -14,9 +14,12 @@
 
 #include "altstrategy/engine/adapt.hpp"
 
+#include "altstrategy/common/error.hpp"
+
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace altstrategy::persistence { class PgPool; }
@@ -83,17 +86,58 @@ struct AttributionWork {
     std::vector<VariantOutcome> variants;
 };
 
+// One publication a committed record owes the bus: a row of
+// altstrategy.publication_outbox, written in the transaction that archives the
+// record and sent by OutboxPublisher with `message_id` as its Nats-Msg-Id.
+struct OutboxMessage {
+    std::string message_id;
+    std::string kind;              // signal_proposed | trade_proposal | market_outcome
+    std::string subject;
+    std::string payload;
+    std::string signal_proposal_id;
+    std::string candidate_id;
+    int64_t created_at_ms = 0;
+};
+
+// An outbox row still owed to the bus.
+struct PendingPublication {
+    std::string message_id;
+    std::string subject;
+    std::string payload;
+    int attempts = 0;
+    int64_t created_at_ms = 0;
+};
+
+// The newest migration (db/migrations) this binary's statements need. On a
+// schema altstrategy-db-migrate has not brought this far every archive would
+// fail, and nothing would be published while the service looked alive: the
+// service refuses to start instead.
+inline constexpr std::string_view kRequiredSchemaMigration = "0013";
+
+struct OutboxBacklog {
+    int64_t pending = 0;
+    int64_t oldest_pending_created_at_ms = 0;   // 0 when nothing is pending
+    int64_t dead_lettered = 0;
+};
+
 class DecisionStore {
 public:
     explicit DecisionStore(altstrategy::persistence::PgPool& pool) : pool_(pool) {}
 
     // Write path (idempotent).
-    bool save_context_snapshot(const DecisionContext& ctx);
-    bool save_candidate(const StrategyCandidate& c);
-    bool save_ranking(const RankedProposal& r);
-    bool save_plan_variant(const TradePlanVariant& v);
-    bool save_proposal(const TradeSignalProposal& s);
-    bool save_market_outcome(const MarketOutcome& o);
+    // The error says whether retrying can help (a dropped connection).
+    Result<void> save_context_snapshot(const DecisionContext& ctx);
+    // Logged on failure; the result says whether the ranking exists to be named.
+    Result<void> save_ranking(const RankedProposal& r);
+    // A candidate's whole decision -- the candidate, its plan variants, its
+    // proposals and the publications they owe -- in ONE transaction (BUG-01):
+    // all of it is durable or none of it is, and the publisher sends nothing
+    // this did not commit. The error says whether retrying can help.
+    Result<void> archive_decision(const StrategyCandidate& c, const std::vector<TradePlanVariant>& plans,
+                                  const std::vector<TradeSignalProposal>& proposals,
+                                  const std::vector<OutboxMessage>& publications);
+    // The outcome and, when given, its publication in one transaction.
+    bool save_market_outcome(const MarketOutcome& o, const OutboxMessage* publication = nullptr);
     bool save_counterfactual(const CounterfactualOutcome& c);
     bool save_attribution(const OutcomeAttribution& a);
     bool save_execution_feedback(const ExecutionFeedback& f);
@@ -108,7 +152,13 @@ public:
                                  const DecisionContext& ctx, const std::string& label_spec_hash);
 
     // Load adaptive state at startup / on refresh.
-    PosteriorTable load_posteriors();
+    //
+    // `min_evidence_version` / `min_plan_geometry_version` (QUALITY-05): learn
+    // only from outcomes of plans at least this geometry version, and load only
+    // posteriors estimated from such evidence (learning.min_plan_geometry_version).
+    // 1 keeps every outcome, including those of the defective version-1
+    // geometry; 2 is the cutover to clean evidence. Nothing is deleted either way.
+    PosteriorTable load_posteriors(int min_evidence_version = 1);
     std::map<std::string, Lifecycle> load_lifecycle_overrides();
     std::map<std::string, ParamValues> load_param_sets();
     // Publish a strategy's tunable schema and, when it has no active set yet,
@@ -122,7 +172,8 @@ public:
                             const std::map<std::string, double>& values,
                             const std::string& derived_from, int64_t now_ms);
     // Predicted-vs-actual aggregates per strategy, for calibrate_parameters().
-    std::map<std::string, engine::CalibrationTargets> load_calibration_targets(int64_t from_ms);
+    std::map<std::string, engine::CalibrationTargets> load_calibration_targets(
+        int64_t from_ms, int min_plan_geometry_version = 1);
 
     // Scheduler helpers.
     // Candidates whose variants have resolved outcomes but no attribution yet.
@@ -134,7 +185,7 @@ public:
         // decision contexts each window offered, not by elapsed time, so the
         // wall clock cannot affect the result. It was taken and discarded, which
         // is a parameter promising an influence it does not have.
-        load_drift_inputs(int64_t from_ms, int64_t split_ms);
+        load_drift_inputs(int64_t from_ms, int64_t split_ms, int min_plan_geometry_version = 1);
     std::vector<PendingProposal> proposals_awaiting_outcome(int64_t now_ms, int limit = 500);
 
     // Candidates old enough for every model horizon to have elapsed and with no
@@ -169,9 +220,39 @@ public:
     // change to the engine describe a system that no longer exists, and training
     // on them re-derives the old verdict no matter how often the derived tables
     // are cleared. 0 means "all history".
-    std::vector<OutcomeSample> load_outcome_samples(int limit = 20000, int64_t from_ms = 0);
+    std::vector<OutcomeSample> load_outcome_samples(int limit = 20000, int64_t from_ms = 0,
+                                                    int min_plan_geometry_version = 1);
     bool mark_proposal_state(const std::string& id, ProposalState state, const std::string& reason,
                              int64_t at_ms);
+
+    // Hypotheses the archive says are still open at `now_ms` (the candidates
+    // whose setup time + horizon lies ahead), to restore the de-duplication
+    // book after a restart. nullopt when the read failed.
+    struct OpenHypothesis {
+        int64_t canonical_pair_id = 0;
+        std::string strategy_id;
+        std::string parameter_set_id;
+        Side side = Side::unspecified;
+        int64_t setup_time_ms = 0;
+        int64_t open_until_ms = 0;
+        double ref_price = 0;
+        double atr = 0;
+    };
+    std::optional<std::vector<OpenHypothesis>> load_open_hypotheses(int64_t now_ms);
+
+    // Publication outbox (OutboxPublisher). A failed read is nullopt, never an
+    // empty backlog.
+    std::optional<std::vector<PendingPublication>> due_publications(int64_t now_ms, int limit);
+    bool mark_published(const std::string& message_id, int64_t at_ms, uint64_t stream_sequence);
+    bool mark_publish_failed(const std::string& message_id, int attempts, int64_t next_attempt_at_ms,
+                             const std::string& error);
+    bool mark_dead_lettered(const std::string& message_id, int64_t at_ms, const std::string& error);
+    std::optional<OutboxBacklog> outbox_backlog();
+
+    // The newest version in altstrategy-db-migrate's ledger, resolved on this
+    // connection exactly as the migrator resolves it (unqualified, same DSN);
+    // "" when no ledger is visible. nullopt: the read itself failed.
+    std::optional<std::string> newest_schema_migration();
 
     // One row per table purged by the current altstrategy.retention_policies pass
     // (§25, §39, §52). Bounds on-disk size to a size the operator chose per table

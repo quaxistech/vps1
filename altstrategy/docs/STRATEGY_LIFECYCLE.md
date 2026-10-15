@@ -12,11 +12,17 @@ deployment from `altstrategy.strategy_lifecycle`, loaded at startup.
 
 | state | runs? | candidates published? | recommended for execution? |
 |---|---|---|---|
-| RESEARCH | yes | yes, `explore_shadow` | never |
-| SHADOW | yes | yes, `explore_shadow` | never |
-| CANDIDATE / LIMITED / ACTIVE | yes | yes, `exploit` | subject to grade + the economic gate |
-| DEGRADED | yes | yes | suppressed |
+| RESEARCH / SHADOW | yes | yes, `explore_shadow` | never |
+| CANDIDATE / LIMITED / ACTIVE | yes | yes, `exploit` | never |
+| DEGRADED | yes | yes | never |
 | DISABLED / RETIRED | no | no | no |
+
+`recommended_for_execution` is false on every proposal: the economic verdict is
+a diagnostic (an `ECON_DIAG_*` warning), the lifecycle state neither grades nor
+suppresses an event, and every proposal that is not technically INVALID is
+published. Whether to act on one is VPS2's decision. In production on
+2026-10-15 no strategy is ACTIVE: nine run as SHADOW, `trend_pullback` as
+CANDIDATE and six as RESEARCH (stored overrides plus compiled seeds).
 
 A RESEARCH or SHADOW strategy is not idle: it produces candidates, they are
 archived, and their outcomes are resolved by the same tracker. That is how a

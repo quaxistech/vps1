@@ -276,6 +276,37 @@ TEST_CASE("an unobserved venue relation scores nothing, not a neutral half point
     CHECK(k2.at("venue_volatility_agreement") == Catch::Approx(0.9));
 }
 
+TEST_CASE("a more convinced model raises a candidate; conviction is never a penalty (HISTORY-01)",
+          "[ranking][regression]") {
+    // AltML's confidence (|p_up - 0.5| * 2) spent its life as `ml_uncertainty`
+    // under a negative weight, so the model's most confident calls ranked lowest.
+    auto ctx = make_ctx(100.0, "TREND_UP");
+    auto c = cand("a", Family::trend, Side::long_, 0.6);
+    c.ml_context = ctx.market_forecast;
+    REQUIRE(c.ml_context.present);
+    REQUIRE_FALSE(c.ml_context.abstain);
+    const auto ens = compute_ensemble({c});
+    const auto score_at = [&](double conviction) {
+        c.ml_context.conviction = conviction;
+        const auto k = ranking_components(c, ctx, ens);
+        CHECK(k.at("ml_conviction") == Catch::Approx(conviction));
+        return policy_score(default_challenger_policy(), k);
+    };
+    CHECK(score_at(0.9) > score_at(0.1));
+
+    const auto& w = default_challenger_policy().weights;
+    CHECK(w.at("ml_conviction") > 0);
+    CHECK(w.count("ml_uncertainty") == 0);
+    for (const auto* penalty : {"posterior_uncertainty", "regime_divergence", "cost_penalty", "warning_penalty",
+                                "venue_rsi_disagreement"})
+        CHECK(w.at(penalty) < 0);
+
+    // An abstaining model contributes no conviction, not a middling one.
+    c.ml_context.conviction = 0.9;
+    c.ml_context.abstain = true;
+    CHECK(ranking_components(c, ctx, ens).at("ml_conviction") == 0.0);
+}
+
 TEST_CASE("the champion fails closed: no positive verdict, no recommendation", "[ranking][policy]") {
     auto ctx = make_ctx();
     SECTION("no model at all") {

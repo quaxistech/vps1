@@ -38,6 +38,17 @@ struct SchedulerConfig {
     // way that invalidates past results — otherwise clearing the derived tables
     // just rebuilds the same verdict from the same history.
     int64_t learning_from_ms = 0;
+    // The minimum plan-geometry version whose outcomes ANY learning may use
+    // (QUALITY-05; db/migrations/0012). 1 keeps the version-1 outcomes of the
+    // ML-target unit defect; raising it to 2 is the approved cutover and
+    // lowering it the rollback -- posteriors carry the version they were
+    // estimated under, so neither direction deletes anything.
+    int min_plan_geometry_version = 1;
+    // Whether calibrate_strategy_parameters() may move live strategy
+    // parameters. It nudges stop_atr / target_atr toward realised / planned
+    // excursions with no holdout, so on outcomes of a defective geometry it
+    // tunes against the defect.
+    bool calibration_enabled = true;
     int64_t lifecycle_min_samples = 100;
     int64_t lifecycle_cooldown_ms = 6LL * 3600 * 1000;
     // Each strategy's DECLARED starting lifecycle, from the registry.
@@ -112,6 +123,10 @@ private:
 
     std::thread thread_;
     std::atomic<bool> running_{false};
+    // Set by stop() and read by every job's per-item loop. The jobs used to
+    // test running_, so a job called directly -- the CLI path, a test --
+    // stopped at its first item because no thread was running.
+    std::atomic<bool> stop_requested_{false};
     int64_t last_from_sequence_ = 0;
     std::string last_snapshot_id_;
 };

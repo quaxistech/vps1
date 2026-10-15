@@ -37,8 +37,8 @@ static MlEvaluation mock_altml(const TradePlanVariant& v, bool available) {
     f.probability_target_before_stop = 0.55;
     f.expected_return = 0.004;
     f.expected_holding_time_min = 120;
-    f.expected_mfe = 0.008;
-    f.expected_mae = 0.004;
+    f.expected_mfe_long_fraction = 0.008;
+    f.expected_mae_long_fraction = -0.004;
     f.conviction = 0.75;
     f.quality_status = "VALID";
     f.model_id = "direction";

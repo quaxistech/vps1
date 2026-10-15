@@ -47,6 +47,18 @@ attributes. Market signals are not suppressed by an economic estimate or by a
 strategy's historical PnL. Only technically invalid proposal geometry or
 expired decision context prevents publication.
 
+**One open hypothesis per (pair, setup, side).** A setup that persists bar
+after bar is one hypothesis held for its declared horizon, published once
+(`HypothesisBook`; for model-only states, one thesis per pair, horizon and
+side). The suppressed repeats are counted in the `strategy_funnel` log as
+`repeat_within_horizon`: 3 199 of 5 249 setups in 36 h on 2026-10-13/14, up to
+90 % for `momentum_continuation`. At start-up the book is rebuilt from the
+candidates still inside their horizon, so a restart does not re-issue them.
+Whether a repeat after a deep reset is really a new episode is measured, not
+yet acted on: each repeat and each re-admission is bucketed by how far price
+went against the open hypothesis, in ATR (`repeat_by_reset`,
+`readmitted_by_reset`: < 0.5, 0.5–1, 1–2, ≥ 2).
+
 ## Persistence and outcomes
 
 AltStrategy persists contexts, candidates, rankings, plans, proposals, market

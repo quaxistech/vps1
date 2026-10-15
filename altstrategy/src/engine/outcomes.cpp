@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace altstrategy::engine {
 
@@ -228,6 +229,157 @@ MarketOutcome reconstruct_outcome(const OutcomeGeometry& g, const std::vector<Pa
     o.realized_gross_return = gross;
     o.realized_net_return = gross - g.cost_bps / 10000.0;
     return o;
+}
+
+MarketOutcome reconstruct_outcome_v2(const OutcomeGeometry& g, const PricePath& path,
+                                     const std::string& candidate_id, const std::string& signal_proposal_id,
+                                     int64_t now_ms) {
+    MarketOutcome o;
+    o.candidate_id = candidate_id;
+    o.signal_proposal_id = signal_proposal_id;
+    o.path_source = path.source;
+    o.created_at_ms = now_ms;
+    o.is_counterfactual = signal_proposal_id.empty();
+    o.outcome_id = ids::make("mkt", ids::join({candidate_id, signal_proposal_id.empty() ? "cf" : signal_proposal_id}));
+    o.evaluator_version = kOutcomeEvaluatorVersion;
+    o.fill_model = kOutcomeFillModel;
+    o.path_bar_ms = path.bar_ms;
+    o.path_gap_count = static_cast<int32_t>(path.gaps.size());
+    const auto settle = [&](MarketOutcomeType type, const char* why) {
+        o.outcome = type;
+        o.resolution = why;
+        o.ambiguous = type == MarketOutcomeType::ambiguous;
+        return o;
+    };
+    const auto& bars = path.bars;
+    if (bars.empty() || path.bar_ms <= 0) return settle(MarketOutcomeType::data_incomplete, "no_path");
+    const int64_t covered_until =
+        path.covered_until_ms > 0 ? path.covered_until_ms : bars.back().open_ms + path.bar_ms;
+    if (g.side != Side::long_ && g.side != Side::short_)
+        return settle(MarketOutcomeType::data_incomplete, "no_side");
+    // Never produced by the plan generator, and its fill (a limit resting at
+    // the trigger) is a second model this evaluator does not pretend to have.
+    if (g.entry_type == EntryType::stop_limit)
+        return settle(MarketOutcomeType::data_incomplete, "entry_type_not_modelled");
+    const bool is_long = g.side == Side::long_;
+    const double dir = is_long ? 1.0 : -1.0;
+    // The first moment the source failed to cover, at or after `from_ms`.
+    const auto gap_from = [&](int64_t from_ms) {
+        int64_t first = std::numeric_limits<int64_t>::max();
+        for (const auto& [a, b] : path.gaps)
+            if (b > from_ms) first = std::min(first, std::max(a, from_ms));
+        return first;
+    };
+
+    // ---- entry ----
+    // Whether a favourable / adverse excursion seen INSIDE the entry bar
+    // provably came after the fill: everything after an entry at the open; a
+    // stop entry crossing its trigger proves only the favourable side; a limit
+    // traded through proves only the adverse side.
+    const int64_t deadline = g.created_at_ms + std::max<int64_t>(g.entry_fill_timeout_ms, 60'000);
+    // A market order takes the resting book: it cannot go unfilled, only
+    // unobserved, so its fill is the first print after the decision however
+    // late. Version 1 recorded 5.8 % of its market entries (Oct 2026, every
+    // one on the raw-trade path) as ENTRY_NOT_REACHED: a quiet tape had
+    // printed nothing within the minute.
+    const bool market = g.entry_type == EntryType::market;
+    const int64_t entry_until = market ? g.time_stop_at_ms : deadline;
+    const int64_t first_gap = gap_from(g.created_at_ms);
+    size_t e = bars.size();
+    double fill = 0;
+    bool fav_after = false, adv_after = false, limit_touched = false;
+    for (size_t i = 0; i < bars.size(); ++i) {
+        const auto& b = bars[i];
+        if (b.open_ms < g.created_at_ms) continue;
+        if (b.open_ms > entry_until) break;
+        if (b.open_ms + path.bar_ms > first_gap) return settle(MarketOutcomeType::data_incomplete, "gap_in_entry_window");
+        if (g.entry_type == EntryType::market) {
+            if (!(b.open > 0)) continue;
+            fill = b.open; fav_after = adv_after = true; e = i;
+        } else if (g.entry_type == EntryType::stop_market) {
+            const double trig = g.trigger_price;
+            if (is_long ? b.open >= trig : b.open <= trig) {          // opened at/through the trigger
+                fill = b.open; fav_after = adv_after = true; e = i;
+            } else if (is_long ? b.high >= trig : b.low <= trig) {
+                fill = trig; fav_after = true; e = i;
+            }
+        } else {
+            const double lim = g.entry_price;
+            if (is_long ? b.open < lim : b.open > lim) {               // opened through the limit
+                fill = lim; fav_after = adv_after = true; e = i;
+            } else if (is_long ? b.low < lim : b.high > lim) {
+                fill = lim; adv_after = true; e = i;
+            } else if (is_long ? b.low == lim : b.high == lim) {
+                limit_touched = true;
+            }
+        }
+        if (e != bars.size()) break;
+    }
+    if (e == bars.size()) {
+        const bool covered = covered_until > entry_until && first_gap > entry_until;
+        if (!covered) return settle(MarketOutcomeType::data_incomplete, "entry_window_not_covered");
+        if (market) return settle(MarketOutcomeType::data_incomplete, "no_print_before_time_stop");
+        return settle(MarketOutcomeType::entry_not_reached,
+                      limit_touched ? "limit_touched_never_traded_through" : "entry_not_reached");
+    }
+    const int64_t entry_time = bars[e].open_ms;
+    o.entry_time_ms = entry_time;
+    o.entry_fill_price = fill;
+    // Filled already beyond a barrier: the plan was overtaken before it began.
+    if (is_long ? fill >= g.take_profit_price || fill <= g.stop_loss_price
+                : fill <= g.take_profit_price || fill >= g.stop_loss_price) {
+        o.resolved_time_ms = entry_time;
+        return settle(MarketOutcomeType::entry_expired, "filled_beyond_level");
+    }
+
+    // ---- exits ----
+    const int64_t exit_gap = gap_from(entry_time);
+    double mfe = 0, mae = 0;   // return fractions from the fill, provably after it
+    const auto finish = [&](MarketOutcomeType type, const char* why, double exit_price, int64_t at_ms) {
+        o.resolved_time_ms = at_ms;
+        o.holding_time_ms = at_ms - entry_time;
+        o.mfe = mfe;
+        o.mae = mae;
+        if (type == MarketOutcomeType::target_first || type == MarketOutcomeType::stop_first ||
+            type == MarketOutcomeType::time_stop) {
+            o.exit_price = exit_price;
+            o.realized_gross_return = dir * (exit_price - fill) / fill;
+            o.realized_net_return = o.realized_gross_return - g.cost_bps / 10000.0;
+        }
+        return settle(type, why);
+    };
+    for (size_t i = e; i < bars.size(); ++i) {
+        const auto& b = bars[i];
+        // Only bars that END by the time stop belong to the position: a touch
+        // in the bar straddling it may come after the position was closed.
+        if (b.open_ms + path.bar_ms > g.time_stop_at_ms) break;
+        if (b.open_ms + path.bar_ms > exit_gap) return settle(MarketOutcomeType::data_incomplete, "gap_before_resolution");
+        const bool fav_ok = i != e || fav_after;
+        const bool adv_ok = i != e || adv_after;
+        if (fav_ok) mfe = std::max(mfe, dir * ((is_long ? b.high : b.low) - fill) / fill);
+        if (adv_ok) mae = std::max(mae, dir * (fill - (is_long ? b.low : b.high)) / fill);
+        // A target is a resting limit: filled only by a trade through it. A
+        // stop triggers on a touch and fills at its level or the open it
+        // gapped past.
+        const bool tgt = is_long ? b.high > g.take_profit_price : b.low < g.take_profit_price;
+        const bool stp = is_long ? b.low <= g.stop_loss_price : b.high >= g.stop_loss_price;
+        if (!tgt && !stp) continue;
+        if (tgt && stp) return finish(MarketOutcomeType::ambiguous, "both_barriers_in_bar", 0, b.open_ms);
+        if (tgt && !fav_ok) return finish(MarketOutcomeType::ambiguous, "entry_bar_target_order_unknown", 0, b.open_ms);
+        if (stp && !adv_ok) return finish(MarketOutcomeType::ambiguous, "entry_bar_stop_order_unknown", 0, b.open_ms);
+        if (tgt) return finish(MarketOutcomeType::target_first, "target", g.take_profit_price, b.open_ms);
+        const bool gapped = i != e && (is_long ? b.open < g.stop_loss_price : b.open > g.stop_loss_price);
+        return finish(MarketOutcomeType::stop_first, gapped ? "stop_gapped" : "stop",
+                      gapped ? b.open : g.stop_loss_price, b.open_ms);
+    }
+
+    // ---- time stop: the close of the last bar that ENDED by it ----
+    if (covered_until < g.time_stop_at_ms || exit_gap < g.time_stop_at_ms)
+        return settle(MarketOutcomeType::data_incomplete, "path_ends_before_time_stop");
+    const PathBar* last = nullptr;
+    for (size_t i = e; i < bars.size() && bars[i].open_ms + path.bar_ms <= g.time_stop_at_ms; ++i) last = &bars[i];
+    if (last == nullptr) return settle(MarketOutcomeType::data_incomplete, "time_stop_within_entry_bar");
+    return finish(MarketOutcomeType::time_stop, "time_stop", last->close, g.time_stop_at_ms);
 }
 
 std::vector<CounterfactualOutcome> compare_counterfactuals(const std::string& ranking_id,

@@ -6,7 +6,9 @@
 // trade aggregates → 1m candles. AltStrategy never writes these tables.
 
 #include "altstrategy/engine/outcomes.hpp"
+#include "altstrategy/engine/trade_plan.hpp"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,10 @@ struct MarketReaderConfig {
     std::string candles_table = "market_candles_1m";
     std::string trades_table = "market_trades_raw";
     bool prefer_raw_trades = true;                  // use the finest available path
+    // AltSpotter's instrument registry, read for the venue's price grid at T0
+    // (db/fdw/altspotter_reference.sql provisions both as foreign tables).
+    std::string instrument_specs_table = "instrument_spec_versions";
+    std::string pair_map_table = "canonical_pair_exchange_map";
 };
 
 struct PathResult {
@@ -33,8 +39,16 @@ public:
     MarketReader(altstrategy::persistence::PgPool& pool, MarketReaderConfig cfg)
         : pool_(pool), cfg_(std::move(cfg)) {}
 
-    // Best-available path for `instrument_id` over [from_ms, to_ms].
+    // Best-available path for `instrument_id` over [from_ms, to_ms] (the legacy
+    // evaluator's read: no coverage check beyond the window's start).
     [[nodiscard]] PathResult read_path(int64_t instrument_id, int64_t from_ms, int64_t to_ms);
+
+    // The path evaluator version 2 reads over [from_ms, to_ms), with its gaps.
+    // Raw-trade buckets are used only when every minute the 1m candles show as
+    // having traded also has raw trades; otherwise the 1m candles, with every
+    // minute missing from them recorded as a gap. A quiet second is not a gap,
+    // a minute that traded with no trade on record is.
+    [[nodiscard]] PricePath read_price_path(int64_t instrument_id, int64_t from_ms, int64_t to_ms);
 
     // Closed Bitget 1m candles over [from_ms, to_ms], whatever finer source
     // exists. A candidate's MARKET outcome is defined on the 1m grid
@@ -50,6 +64,10 @@ public:
     struct VolumeMinute { int64_t open_ms = 0; double quote_volume = 0, base_volume = 0; };
     [[nodiscard]] std::vector<VolumeMinute> read_volume_minutes(int64_t instrument_id,
                                                                 int64_t from_ms, int64_t to_ms);
+
+    // Every Bitget price-grid version, keyed by canonical pair. nullopt when the
+    // registry could not be read -- a failed read is not an empty registry.
+    [[nodiscard]] std::optional<PriceTickTable> read_price_ticks();
 
 private:
     std::vector<PathBar> read_candles(int64_t instrument_id, int64_t from_ms, int64_t to_ms);

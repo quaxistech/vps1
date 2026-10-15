@@ -8,9 +8,32 @@
 
 #include "altstrategy/engine/decision_types.hpp"
 
+#include <map>
 #include <vector>
 
 namespace altstrategy::engine {
+
+// The plan-geometry definition. 1: everything written before it was versioned
+// (ML excursions read as bps although AltML sends fractions, the LONG MFE used
+// for SHORT targets, a magnitude-derived tick). 2: side-aware magnitudes in
+// bps from the candidate's ACTIVE prediction, the venue's tick at T0, stops
+// rounded away from the entry. Outcomes are compared within one version only.
+inline constexpr int kPlanGeometryVersion = 2;
+
+// One version of a venue instrument's price grid (AltSpotter
+// instrument_spec_versions), keyed below by canonical pair.
+struct PriceTickVersion {
+    int64_t valid_from_ms = 0;
+    int64_t version = 0;
+    double tick = 0;
+};
+using PriceTickTable = std::map<int64_t, std::vector<PriceTickVersion>>;
+
+// The grid in force at `t_ms`: the newest valid_from <= t_ms, the higher
+// version on a tie -- the rule the Gateway uses for the spec it attaches to the
+// signal, so the plan and its execution context describe one grid. nullptr
+// when the pair has no version that early.
+[[nodiscard]] const PriceTickVersion* price_tick_at(const PriceTickTable& table, int64_t pair, int64_t t_ms);
 
 // Fill-time estimate (§26 first prompt / §12). Minutes, plus a bounded timeout.
 struct FillEstimate {
@@ -26,7 +49,10 @@ struct FillEstimate {
                                          double volatility_bps, double liquidity_score);
 
 struct PlanConfig {
-    double tick_size = 0;            // 0 => derive from price magnitude
+    // One grid for every instrument: tests and replay only. A live plan uses
+    // DecisionContext::price_tick (the venue's spec at T0); with neither, the
+    // tick is derived from the price magnitude and recorded as "derived".
+    double tick_size = 0;
     double min_stop_bps = 8.0;      // never tighter than this
     int64_t scalp_max_ms = 30LL * 60 * 1000;
     int64_t intraday_max_ms = 8LL * 3600 * 1000;
@@ -38,13 +64,14 @@ struct PlanConfig {
     double default_max_slippage_bps = 6.0;
 };
 
-// Round a price to the tick grid (derived from magnitude when tick unknown).
 // Which entry a candidate would be placed with. Exposed because the RANKING
 // has to price the same fill the plan will actually use: a limit entry is a
 // maker fill and costs a third of a market entry's fee, and ranking a candidate
 // against the wrong leg is ranking it against a cost it will never pay.
 [[nodiscard]] EntryType choose_entry(const StrategyCandidate& c, const DecisionContext& ctx);
 
+// Round a price to the nearest point of the tick grid (derived from the price
+// magnitude when tick <= 0).
 [[nodiscard]] double round_to_tick(double price, double tick);
 
 // Build the three geometries for a candidate. Deterministic in (candidate, ctx).

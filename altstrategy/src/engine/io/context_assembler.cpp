@@ -278,7 +278,11 @@ void ContextAssembler::ingest_alttech(const ParsedAltTech& p) {
                 // the vectors never arrived, arrived invalid, or arrived and
                 // were rejected at admission. This says which.
                 const bool first_time = !st.context_features.count(p.timeframe_minutes);
-                st.context_features[p.timeframe_minutes] = std::move(decoded);
+                auto& grid = st.context_features[p.timeframe_minutes];
+                // Bar-ordered like the execution grid below: a backfilled bar
+                // (admissible for up to max_context_age) never replaces a newer one.
+                if (!first_time && decoded.bar_open_time_ms < grid.bar_open_time_ms) break;
+                grid = std::move(decoded);
                 if (first_time) {
                     const auto& g = st.context_features[p.timeframe_minutes];
                     log::info("context_grid_received",
@@ -324,7 +328,10 @@ void ContextAssembler::ingest_alttech(const ParsedAltTech& p) {
                 report_schema_mismatch("reference_features", cfg_.bitget_features, p);
                 break;
             }
-            st.reference_features[p.venue] = std::move(decoded);
+            // Bar-ordered, as the target's own vector is.
+            auto& reference = st.reference_features[p.venue];
+            if (decoded.bar_open_time_ms < reference.bar_open_time_ms) break;
+            reference = std::move(decoded);
             break;
         }
         case AltTechKind::cross_venue_features: {

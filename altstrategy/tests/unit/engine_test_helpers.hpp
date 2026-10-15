@@ -102,8 +102,10 @@ inline DecisionContext make_ctx(double px = 100.0, const std::string& regime = "
     c.market_forecast.p_up = 0.58;
     c.market_forecast.p_down = 0.25;
     c.market_forecast.expected_return = 0.004;
-    c.market_forecast.expected_mfe = 90;   // bps
-    c.market_forecast.expected_mae = 40;   // bps
+    // Return fractions, as AltML sends them (this fixture used to set 90 and
+    // 40 and call them bps -- the very misreading QUALITY-01 is about).
+    c.market_forecast.expected_mfe_long_fraction = 0.0090;
+    c.market_forecast.expected_mae_long_fraction = -0.0040;
     // Conviction, not uncertainty: 0.58 up vs 0.25 down is |0.58-0.5|*2 = 0.16.
     c.market_forecast.conviction = 0.16;
     c.market_forecast.quality_status = "VALID";

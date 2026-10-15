@@ -184,8 +184,12 @@ adaptive_allocator:
 
 # --- ranking (§10, §19) ------------------------------------------------------
 # Intentionally NOT configurable. The champion/challenger policy identities
-# (`champion_v1` / `challenger_v1`) and the close-gap threshold are compiled in
-# (src/engine/ranking.cpp) and are written into strategy_rankings as identity.
+# (`champion_ml_v2` 2.0.0, ranking on AltML's expected net return for the
+# side, and `challenger_static_v1` 1.0.0, the hand-weighted sum) and the
+# close-gap threshold are compiled in (src/engine/ranking.cpp) and are written
+# into strategy_rankings as identity. A ranking orders; it recommends nothing
+# for execution, and neither ordering has shown out-of-sample value
+# (docs/MARKET_OUTCOMES.md, "What the measurements say").
 
 # --- trade plan (§11, §14, §15) ----------------------------------------------
 trade_plan:
@@ -199,7 +203,32 @@ outcomes:
   bitget_exchange_id: 1
   candles_table: market_candles_1m
   trades_table: market_trades_raw
+  # Raw trades only where they provably cover the window: every minute whose
+  # candle traded has trades. Otherwise 1m candles, missing minutes as gaps.
   prefer_raw_trades: true
+  # The venue's price grid at T0 (plan geometry 2): AltSpotter's spec
+  # versions and pair map, as postgres_fdw foreign tables created by
+  # db/fdw/altspotter_reference.sql. Without them every plan uses a tick
+  # derived from the price magnitude and says so (TICK_SIZE_DERIVED).
+  instrument_specs_table: instrument_spec_versions
+  pair_map_table: canonical_pair_exchange_map
+
+# --- publication (BUG-01/02) ----------------------------------------------------
+# Every proposal and market outcome is queued in the archive's transactional
+# outbox and sent to JetStream by one publisher, marked sent only on the
+# stream's ack. A message unsent after max_age_hours is dead-lettered: kept,
+# logged and counted, never purged; db/operator/outbox_requeue_dead_lettered.sql
+# sends it again.
+publication:
+  ack_timeout_ms: 5000
+  max_age_hours: 24
+
+# --- learning epoch (QUALITY-05) -------------------------------------------------
+# Posteriors, drift, lifecycle and parameter calibration use only outcomes of
+# proposals whose plan geometry is at least this version. 1 keeps every
+# outcome; 2 learns only from plans with the unit and side fixes (QUALITY-01/02).
+learning:
+  min_plan_geometry_version: 1
 
 # --- execution feedback (§21) — OPTIONAL; VPS1 never blocks on it -------------
 execution_feedback:
@@ -207,7 +236,10 @@ execution_feedback:
 
 # --- drift / calibration / lifecycle (§35, §36, §37) -------------------------
 # The drift scan runs on the maintenance tick and has no settings of its own.
+# calibration.enabled switches the parameter calibrator (installs a new active
+# parameter set per strategy); both keys used to be inert.
 calibration:
+  enabled: true
   min_samples: 30
 lifecycle:
   min_samples: 100

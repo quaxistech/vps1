@@ -26,8 +26,8 @@ MlEvaluation ml_from_forecast(const MarketForecastView& f) {
     out.p_down = f.p_down;
     out.p_target_before_stop = f.probability_target_before_stop;
     out.expected_net_return = f.expected_return;
-    out.expected_mfe = f.expected_mfe;
-    out.expected_mae = f.expected_mae;
+    out.expected_mfe_long_fraction = f.expected_mfe_long_fraction;
+    out.expected_mae_long_fraction = f.expected_mae_long_fraction;
     out.expected_holding_time_min = f.expected_holding_time_min;
     out.conviction = f.conviction;
     out.quality_status = f.quality_status;

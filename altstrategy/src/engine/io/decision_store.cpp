@@ -94,7 +94,7 @@ bool ok(const char* op, const R& r) {
 }
 }  // namespace
 
-bool DecisionStore::save_context_snapshot(const DecisionContext& c) {
+Result<void> DecisionStore::save_context_snapshot(const DecisionContext& c) {
     const ObservedScalars sc = observed_scalars(c);   // NULL where not observed
     auto r = pool_.with_txn([&](pqxx::work& txn) {
         txn.exec_params(
@@ -116,11 +116,15 @@ bool DecisionStore::save_context_snapshot(const DecisionContext& c) {
             c.spread_observed, c.depth_observed,
             context_snapshot_json(c));
     });
-    return ok("save_context_snapshot", r);
+    ok("save_context_snapshot", r);
+    return r;
 }
 
-bool DecisionStore::save_candidate(const StrategyCandidate& c) {
-    auto r = pool_.with_txn([&](pqxx::work& txn) {
+namespace {
+
+// The rows of one decision, written inside the caller's transaction (see
+// DecisionStore::archive_decision). Idempotent on the natural key.
+void insert_candidate(pqxx::work& txn, const StrategyCandidate& c) {
         txn.exec_params(
             "INSERT INTO altstrategy.strategy_candidates("
             "candidate_id,natural_key,canonical_pair_id,strategy_id,strategy_version,parameter_set_id,"
@@ -156,7 +160,7 @@ bool DecisionStore::save_candidate(const StrategyCandidate& c) {
         if (!c.descriptors.empty()) {
             txn.exec_params("UPDATE altstrategy.strategy_candidates SET descriptors = $2::jsonb "
                             "WHERE candidate_id = $1 AND descriptors IS NULL",
-                            c.candidate_id, json_of(c.descriptors));
+                            c.candidate_id, engine_io::json_of(c.descriptors));
         }
         // The market view on every served horizon. A horizon without numbers
         // is still a row: MISSING / ABSTAIN / INCOMPATIBLE is a finding.
@@ -192,9 +196,9 @@ bool DecisionStore::save_candidate(const StrategyCandidate& c) {
         for (const auto& w : c.warnings)
             txn.exec_params("INSERT INTO altstrategy.strategy_candidate_reasons(candidate_id,ordinal,kind,code)"
                             " VALUES($1,$2,'warning',$3) ON CONFLICT DO NOTHING", c.candidate_id, ord++, w);
-    });
-    return ok("save_candidate", r);
 }
+
+} // namespace
 
 std::vector<DecisionStore::PendingCandidate> DecisionStore::candidates_awaiting_market_outcome(
     int64_t now_ms, int limit) {
@@ -239,7 +243,7 @@ bool DecisionStore::save_candidate_market_outcome(const CandidateMarketOutcome& 
     return ok("save_candidate_market_outcome", r);
 }
 
-bool DecisionStore::save_ranking(const RankedProposal& r) {
+Result<void> DecisionStore::save_ranking(const RankedProposal& r) {
     auto res = pool_.with_txn([&](pqxx::work& txn) {
         txn.exec_params(
             "INSERT INTO altstrategy.strategy_rankings(ranking_id,natural_key,canonical_pair_id,context_id,"
@@ -257,32 +261,34 @@ bool DecisionStore::save_ranking(const RankedProposal& r) {
                 r.ranking_id, rc.candidate_id, rc.rank, rc.final_score, rc.adaptive_weight,
                 rc.posterior_edge, json_of(rc.components));
     });
-    return res.has_value();
+    // Rankings are diagnostics and gate nothing, but a failed write is still
+    // said out loud -- this one used to return a bare false.
+    ok("save_ranking", res);
+    return res;
 }
 
-bool DecisionStore::save_plan_variant(const TradePlanVariant& v) {
-    auto r = pool_.with_txn([&](pqxx::work& txn) {
+namespace {
+
+void insert_plan_variant(pqxx::work& txn, const TradePlanVariant& v) {
         txn.exec_params(
             "INSERT INTO altstrategy.trade_plan_variants(variant_id,natural_key,candidate_id,context_id,"
             "canonical_pair_id,profile,side,entry_type,entry_price,entry_lower,entry_upper,trigger_price,"
             "stop_loss_price,take_profit_price,optional_secondary_target,max_holding_time_ms,time_stop_at_ms,"
             "expected_fill_time_p50_min,expected_fill_time_p90_min,entry_fill_timeout_ms,stop_distance_bps,"
-            "stop_distance_atr,target_distance_bps,expected_rr,stop_basis,target_basis,invalidation_reason) "
+            "stop_distance_atr,target_distance_bps,expected_rr,stop_basis,target_basis,invalidation_reason,"
+            "plan_geometry_version,tick_size,tick_source) "
             "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,"
-            "$25,$26,$27) ON CONFLICT (natural_key) DO NOTHING",
+            "$25,$26,$27,$28,$29,$30) ON CONFLICT (natural_key) DO NOTHING",
             v.variant_id, v.natural_key, v.candidate_id, v.context_id, v.canonical_pair_id,
             to_string(v.profile), to_string(v.side), to_string(v.entry_type), v.entry_price, v.entry_lower,
             v.entry_upper, v.trigger_price, v.stop_loss_price, v.take_profit_price,
             v.optional_secondary_target, v.max_holding_time_ms, v.time_stop_at_ms,
             v.expected_fill_time_p50_min, v.expected_fill_time_p90_min, v.entry_fill_timeout_ms,
             v.stop_distance_bps, v.stop_distance_atr, v.target_distance_bps, v.expected_rr, v.stop_basis,
-            v.target_basis, v.invalidation_reason);
-    });
-    return ok("save_plan_variant", r);
+            v.target_basis, v.invalidation_reason, v.geometry_version, v.tick_size, v.tick_source);
 }
 
-bool DecisionStore::save_proposal(const TradeSignalProposal& s) {
-    auto r = pool_.with_txn([&](pqxx::work& txn) {
+void insert_proposal(pqxx::work& txn, const TradeSignalProposal& s) {
         txn.exec_params(
             "INSERT INTO altstrategy.trade_signal_proposals(signal_proposal_id,natural_key,candidate_id,"
             "ranking_id,canonical_pair_id,bitget_instrument_id,strategy_id,strategy_version,parameter_set_id,"
@@ -297,11 +303,11 @@ bool DecisionStore::save_proposal(const TradeSignalProposal& s) {
             "risk_flags,reason_codes,recommended_for_execution,alternative_plan_ids,context_revision,"
             "feature_manifest_hash,model_versions,ranking_policy_id,state,"
             "cost_model_version,fee_bps_round_trip,spread_cost_bps,slippage_cost_bps,"
-            "round_trip_cost_bps,spread_observed) "
+            "round_trip_cost_bps,spread_observed,plan_geometry_version) "
             "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,"
             "$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,"
             "$44,$45,$46,$47,$48::text[],$49::text[],$50,$51::text[],$52,$53,$54::text[],$55,"
-            "$56,$57,$58,$59,$60,$61,$62) "
+            "$56,$57,$58,$59,$60,$61,$62,$63) "
             "ON CONFLICT (natural_key) DO NOTHING",
             s.signal_proposal_id, s.natural_key, s.candidate_id, s.ranking_id, s.canonical_pair_id,
             s.bitget_instrument_id, s.strategy_id, s.strategy_version, s.parameter_set_id, to_string(s.side),
@@ -319,7 +325,7 @@ bool DecisionStore::save_proposal(const TradeSignalProposal& s) {
             s.recommended_for_execution, pg_array(s.alternative_plan_ids), s.context_revision,
             s.feature_manifest_hash, pg_array(s.model_versions), s.ranking_policy_id, to_string(s.state),
             s.cost_model_version, s.fee_bps_round_trip, s.spread_cost_bps, s.slippage_cost_bps,
-            s.round_trip_cost_bps, s.cost_spread_observed);
+            s.round_trip_cost_bps, s.cost_spread_observed, s.plan_geometry_version);
         int ord = 0;
         for (const auto& w : s.warnings)
             txn.exec_params("INSERT INTO altstrategy.proposal_warnings(signal_proposal_id,ordinal,code,detail,"
@@ -328,11 +334,153 @@ bool DecisionStore::save_proposal(const TradeSignalProposal& s) {
         txn.exec_params("INSERT INTO altstrategy.proposal_state_events(signal_proposal_id,ordinal,from_state,"
                         "to_state,reason,at_ms) VALUES($1,0,NULL,$2,'created',$3) ON CONFLICT DO NOTHING",
                         s.signal_proposal_id, to_string(s.state), s.created_at_ms);
-    });
-    return ok("save_proposal", r);
 }
 
-bool DecisionStore::save_market_outcome(const MarketOutcome& o) {
+// A row is owed to the bus from the moment it commits; it is due at once.
+void insert_publication(pqxx::work& txn, const OutboxMessage& m) {
+    const auto opt = [](const std::string& x) {
+        return x.empty() ? std::optional<std::string>() : std::optional<std::string>(x);
+    };
+    const std::basic_string<std::byte> payload(reinterpret_cast<const std::byte*>(m.payload.data()),
+                                               m.payload.size());
+    txn.exec_params(
+        "INSERT INTO altstrategy.publication_outbox(message_id,kind,subject,payload,signal_proposal_id,"
+        "candidate_id,created_at_ms,next_attempt_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8) "
+        "ON CONFLICT (message_id) DO NOTHING",
+        m.message_id, m.kind, m.subject, payload, opt(m.signal_proposal_id), opt(m.candidate_id),
+        m.created_at_ms, m.created_at_ms);
+}
+
+} // namespace
+
+Result<void> DecisionStore::archive_decision(const StrategyCandidate& c,
+                                             const std::vector<TradePlanVariant>& plans,
+                                             const std::vector<TradeSignalProposal>& proposals,
+                                             const std::vector<OutboxMessage>& publications) {
+    return pool_.with_txn([&](pqxx::work& txn) {
+        insert_candidate(txn, c);
+        for (const auto& v : plans) insert_plan_variant(txn, v);
+        for (const auto& s : proposals) insert_proposal(txn, s);
+        for (const auto& m : publications) insert_publication(txn, m);
+    });
+}
+
+std::optional<std::vector<DecisionStore::OpenHypothesis>> DecisionStore::load_open_hypotheses(int64_t now_ms) {
+    std::vector<OpenHypothesis> out;
+    const bool read = read_txn(pool_, "load_open_hypotheses", [&](pqxx::work& txn) {
+        for (const auto& row : txn.exec_params(
+                 "SELECT c.canonical_pair_id, c.strategy_id, c.parameter_set_id, c.side, c.setup_time_ms, "
+                 "c.setup_time_ms + c.expected_horizon_ms, c.entry_hint, "
+                 "COALESCE((s.snapshot->'bitget_features'->>'atr_14')::float8, 0) "
+                 "FROM altstrategy.strategy_candidates c "
+                 "LEFT JOIN altstrategy.decision_context_snapshots s ON s.context_id = c.context_id "
+                 "WHERE c.expected_horizon_ms > 0 AND c.setup_time_ms + c.expected_horizon_ms > $1",
+                 now_ms)) {
+            OpenHypothesis h;
+            h.canonical_pair_id = row[0].as<int64_t>();
+            h.strategy_id = row[1].as<std::string>();
+            h.parameter_set_id = row[2].as<std::string>();
+            h.side = side_from_string(row[3].as<std::string>());
+            h.setup_time_ms = row[4].as<int64_t>();
+            h.open_until_ms = row[5].as<int64_t>();
+            h.ref_price = row[6].as<double>();
+            h.atr = row[7].as<double>();
+            out.push_back(std::move(h));
+        }
+    });
+    if (!read) return std::nullopt;
+    return out;
+}
+
+std::optional<std::vector<PendingPublication>> DecisionStore::due_publications(int64_t now_ms, int limit) {
+    std::vector<PendingPublication> out;
+    const bool read = read_txn(pool_, "due_publications", [&](pqxx::work& txn) {
+        for (const auto& row : txn.exec_params(
+                 "SELECT message_id, subject, payload, attempts, created_at_ms "
+                 "FROM altstrategy.publication_outbox "
+                 "WHERE settled_at IS NULL AND dead_lettered_at_ms IS NULL AND next_attempt_at_ms <= $1 "
+                 "ORDER BY created_at_ms, message_id LIMIT $2",
+                 now_ms, limit)) {
+            PendingPublication p;
+            p.message_id = row[0].as<std::string>();
+            p.subject = row[1].as<std::string>();
+            const auto bytes = row[2].as<std::basic_string<std::byte>>();
+            p.payload.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            p.attempts = row[3].as<int>();
+            p.created_at_ms = row[4].as<int64_t>();
+            out.push_back(std::move(p));
+        }
+    });
+    if (!read) return std::nullopt;
+    return out;
+}
+
+bool DecisionStore::mark_published(const std::string& message_id, int64_t at_ms, uint64_t stream_sequence) {
+    auto r = pool_.with_txn([&](pqxx::work& txn) {
+        txn.exec_params(
+            "UPDATE altstrategy.publication_outbox SET published_at_ms = $2, stream_sequence = $3, "
+            "attempts = attempts + 1, last_error = NULL, settled_at = now() "
+            "WHERE message_id = $1 AND settled_at IS NULL AND dead_lettered_at_ms IS NULL",
+            message_id, at_ms, static_cast<int64_t>(stream_sequence));
+    });
+    return ok("mark_published", r);
+}
+
+bool DecisionStore::mark_publish_failed(const std::string& message_id, int attempts,
+                                        int64_t next_attempt_at_ms, const std::string& error) {
+    auto r = pool_.with_txn([&](pqxx::work& txn) {
+        txn.exec_params(
+            "UPDATE altstrategy.publication_outbox SET attempts = $2, next_attempt_at_ms = $3, "
+            "last_error = $4 WHERE message_id = $1 AND settled_at IS NULL AND dead_lettered_at_ms IS NULL",
+            message_id, attempts, next_attempt_at_ms, error);
+    });
+    return ok("mark_publish_failed", r);
+}
+
+bool DecisionStore::mark_dead_lettered(const std::string& message_id, int64_t at_ms, const std::string& error) {
+    // Not settled: a dead-lettered row leaves the publisher's scan and stays out
+    // of retention's reach, with its payload, until an operator requeues it.
+    auto r = pool_.with_txn([&](pqxx::work& txn) {
+        txn.exec_params(
+            "UPDATE altstrategy.publication_outbox SET dead_lettered_at_ms = $2, last_error = $3 "
+            "WHERE message_id = $1 AND settled_at IS NULL AND dead_lettered_at_ms IS NULL",
+            message_id, at_ms, error);
+    });
+    return ok("mark_dead_lettered", r);
+}
+
+std::optional<OutboxBacklog> DecisionStore::outbox_backlog() {
+    OutboxBacklog b;
+    const bool read = read_txn(pool_, "outbox_backlog", [&](pqxx::work& txn) {
+        // Each count is answered by its own partial index, not by a scan of
+        // the settled rows retention keeps for fourteen days.
+        const auto row = txn.exec1(
+            "SELECT (SELECT count(*) FROM altstrategy.publication_outbox "
+            "        WHERE settled_at IS NULL AND dead_lettered_at_ms IS NULL), "
+            "       (SELECT COALESCE(min(created_at_ms), 0) FROM altstrategy.publication_outbox "
+            "        WHERE settled_at IS NULL AND dead_lettered_at_ms IS NULL), "
+            "       (SELECT count(*) FROM altstrategy.publication_outbox WHERE dead_lettered_at_ms IS NOT NULL)");
+        b.pending = row[0].as<int64_t>();
+        b.oldest_pending_created_at_ms = row[1].as<int64_t>();
+        b.dead_lettered = row[2].as<int64_t>();
+    });
+    if (!read) return std::nullopt;
+    return b;
+}
+
+std::optional<std::string> DecisionStore::newest_schema_migration() {
+    std::string newest;
+    const bool read = read_txn(pool_, "newest_schema_migration", [&](pqxx::work& txn) {
+        // Two statements: a query naming an absent table fails at planning,
+        // whatever branch would have run.
+        if (txn.exec1("SELECT to_regclass('schema_migrations') IS NOT NULL")[0].as<bool>())
+            newest = txn.exec1("SELECT COALESCE(max(version), '') FROM schema_migrations")[0].as<std::string>();
+    });
+    if (!read) return std::nullopt;
+    return newest;
+}
+
+bool DecisionStore::save_market_outcome(const MarketOutcome& o, const OutboxMessage* publication) {
     std::optional<std::string> proposal_id;
     if (!o.signal_proposal_id.empty()) proposal_id = o.signal_proposal_id;
     // Report whether an outcome for THIS row now exists, not merely whether the
@@ -342,28 +490,52 @@ bool DecisionStore::save_market_outcome(const MarketOutcome& o) {
     // still saw it as pending. It was then re-selected on every pass and wrote
     // another OUTCOME_FINAL state event, forever.
     bool stored = false;
+    // A return exists only where a position was held to a resolution. The
+    // legacy evaluator wrote 0.0 for every other outcome, which a learning
+    // query reads as a trade that broke even; from version 2 it is NULL.
+    const bool versioned = o.evaluator_version > 0;
+    const bool traded = o.outcome == MarketOutcomeType::target_first ||
+                        o.outcome == MarketOutcomeType::stop_first || o.outcome == MarketOutcomeType::time_stop;
+    const bool excursions = traded || o.outcome == MarketOutcomeType::ambiguous;
+    const auto num = [&](bool present, double v) {
+        return !versioned || present ? std::optional<double>(v) : std::nullopt;
+    };
+    const auto txt = [](const std::string& x) {
+        return x.empty() ? std::optional<std::string>() : std::optional<std::string>(x);
+    };
     auto r = pool_.with_txn([&](pqxx::work& txn) {
         const auto res = txn.exec_params(
             "INSERT INTO altstrategy.market_outcomes(outcome_id,signal_proposal_id,candidate_id,"
             "canonical_pair_id,outcome,path_source,entry_time_ms,resolved_time_ms,entry_fill_price,"
             "exit_price,realized_gross_return,realized_net_return,mfe,mae,holding_time_ms,ambiguous,"
-            "is_counterfactual,cost_model_version,round_trip_cost_bps) "
-            "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) "
+            "is_counterfactual,cost_model_version,round_trip_cost_bps,evaluator_version,fill_model,"
+            "resolution,path_bar_ms,path_gap_count) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) "
             "ON CONFLICT DO NOTHING RETURNING outcome_id",
             o.outcome_id, proposal_id, o.candidate_id, o.canonical_pair_id, to_string(o.outcome),
-            to_string(o.path_source), o.entry_time_ms, o.resolved_time_ms, o.entry_fill_price, o.exit_price,
-            o.realized_gross_return, o.realized_net_return, o.mfe, o.mae, o.holding_time_ms, o.ambiguous,
-            o.is_counterfactual, o.cost_model_version, o.round_trip_cost_bps);
-        if (!res.empty()) { stored = true; return; }
-        // Already recorded by an earlier pass: idempotent, and still "stored".
-        const auto existing = txn.exec_params(
-            "SELECT 1 FROM altstrategy.market_outcomes "
-            "WHERE is_counterfactual = $2 AND ("
-            "  ($2 AND candidate_id = $3) OR (NOT $2 AND signal_proposal_id = $1))",
-            proposal_id, o.is_counterfactual, o.candidate_id);
-        stored = !existing.empty();
+            to_string(o.path_source), o.entry_time_ms, o.resolved_time_ms, o.entry_fill_price,
+            num(traded, o.exit_price), num(traded, o.realized_gross_return), num(traded, o.realized_net_return),
+            num(excursions, o.mfe), num(excursions, o.mae), o.holding_time_ms, o.ambiguous,
+            o.is_counterfactual, o.cost_model_version, o.round_trip_cost_bps,
+            versioned ? std::optional<int>(o.evaluator_version) : std::nullopt, txt(o.fill_model),
+            txt(o.resolution), versioned ? std::optional<int64_t>(o.path_bar_ms) : std::nullopt,
+            versioned ? std::optional<int>(o.path_gap_count) : std::nullopt);
+        if (res.empty()) {
+            // Already recorded by an earlier pass: idempotent, and still "stored".
+            const auto existing = txn.exec_params(
+                "SELECT 1 FROM altstrategy.market_outcomes "
+                "WHERE is_counterfactual = $2 AND ("
+                "  ($2 AND candidate_id = $3) OR (NOT $2 AND signal_proposal_id = $1))",
+                proposal_id, o.is_counterfactual, o.candidate_id);
+            stored = !existing.empty();
+        } else {
+            stored = true;
+        }
+        // Idempotent on message_id, so a pass that finds the outcome already
+        // stored cannot queue it twice.
+        if (stored && publication != nullptr) insert_publication(txn, *publication);
     });
-    return r.has_value() && stored;
+    return ok("save_market_outcome", r) && stored;
 }
 
 bool DecisionStore::save_counterfactual(const CounterfactualOutcome& c) {
@@ -417,16 +589,18 @@ bool DecisionStore::save_posterior(const StrategyPosterior& p) {
             "INSERT INTO altstrategy.strategy_posteriors(strategy_id,strategy_version,parameter_set_id,"
             "regime,symbol_group,canonical_pair_id,side,holding_class,strategy_prior,posterior_mean_edge,"
             "posterior_uncertainty,effective_sample_size,shrinkage_factor,time_decay_state,adaptive_weight,"
-            "sample_count,updated_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) "
+            "sample_count,updated_at_ms,evidence_version) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) "
             "ON CONFLICT (strategy_id,strategy_version,parameter_set_id,regime,symbol_group,canonical_pair_id,"
             "side,holding_class) DO UPDATE SET posterior_mean_edge=EXCLUDED.posterior_mean_edge,"
             "posterior_uncertainty=EXCLUDED.posterior_uncertainty,effective_sample_size=EXCLUDED.effective_sample_size,"
             "shrinkage_factor=EXCLUDED.shrinkage_factor,adaptive_weight=EXCLUDED.adaptive_weight,"
-            "sample_count=EXCLUDED.sample_count,updated_at_ms=EXCLUDED.updated_at_ms,updated_at=now()",
+            "sample_count=EXCLUDED.sample_count,updated_at_ms=EXCLUDED.updated_at_ms,"
+            "evidence_version=EXCLUDED.evidence_version,updated_at=now()",
             p.strategy_id, p.strategy_version, p.parameter_set_id, p.regime, p.symbol_group,
             p.canonical_pair_id, to_string(p.side), to_string(p.holding_class), p.strategy_prior,
             p.posterior_mean_edge, p.posterior_uncertainty, p.effective_sample_size, p.shrinkage_factor,
-            p.time_decay_state, p.adaptive_weight, p.sample_count, p.updated_at_ms);
+            p.time_decay_state, p.adaptive_weight, p.sample_count, p.updated_at_ms, p.evidence_version);
     });
     return ok("save_posterior", r);
 }
@@ -509,7 +683,8 @@ bool DecisionStore::upsert_training_example(const TradeSignalProposal& s, const 
     return ok("upsert_training_example", r);
 }
 
-std::vector<OutcomeSample> DecisionStore::load_outcome_samples(int limit, int64_t from_ms) {
+std::vector<OutcomeSample> DecisionStore::load_outcome_samples(int limit, int64_t from_ms,
+                                                              int min_plan_geometry_version) {
     std::vector<OutcomeSample> out;
     read_txn(pool_, "load_outcome_samples", [&](pqxx::work& txn) {
         // The candidate carries the identity and the market state the decision
@@ -524,8 +699,14 @@ std::vector<OutcomeSample> DecisionStore::load_outcome_samples(int limit, int64_
                  "JOIN altstrategy.strategy_candidates c ON c.candidate_id = o.candidate_id "
                  "JOIN altstrategy.trade_signal_proposals p "
                  "  ON p.signal_proposal_id = o.signal_proposal_id "
-                 "WHERE NOT o.is_counterfactual AND o.outcome <> 'ENTRY_NOT_REACHED' "
+                 // A position held to a resolution, and nothing else. This
+                 // excluded only ENTRY_NOT_REACHED, so 5 779 ENTRY_EXPIRED rows
+                 // the legacy evaluator wrote with a 0.0 return entered every
+                 // posterior as trades that broke even.
+                 "WHERE NOT o.is_counterfactual AND o.outcome IN ('TARGET_FIRST','STOP_FIRST','TIME_STOP') "
                  "  AND o.realized_net_return IS NOT NULL "
+                 // QUALITY-05: evidence from plans of at least this geometry.
+                 "  AND COALESCE(p.plan_geometry_version, 1) >= $3::int "
                  // A trade whose stop sat 93 % away from entry is not evidence
                  // about a strategy's edge, it is evidence about a defect. Such
                  // outcomes existed here in bulk and, being four times more
@@ -551,7 +732,7 @@ std::vector<OutcomeSample> DecisionStore::load_outcome_samples(int limit, int64_
                  // transition could fire in either direction.
                  "  AND ($2::bigint = 0 OR p.created_at_ms >= $2::bigint) "
                  "ORDER BY o.created_at DESC LIMIT $1",
-                 limit, from_ms)) {
+                 limit, from_ms, min_plan_geometry_version)) {
             OutcomeSample s;
             s.strategy_id = row[0].as<std::string>();
             s.strategy_version = row[1].as<std::string>();
@@ -620,14 +801,15 @@ bool DecisionStore::save_calibration_run(const std::string& run_id, const std::s
     return ok("save_calibration_run", r);
 }
 
-PosteriorTable DecisionStore::load_posteriors() {
+PosteriorTable DecisionStore::load_posteriors(int min_evidence_version) {
     PosteriorTable table;
     read_txn(pool_, "load_posteriors", [&](pqxx::work& txn) {
-        for (const auto& row : txn.exec(
+        for (const auto& row : txn.exec_params(
                  "SELECT strategy_id,strategy_version,parameter_set_id,regime,symbol_group,canonical_pair_id,"
                  "side,holding_class,strategy_prior,posterior_mean_edge,posterior_uncertainty,"
                  "effective_sample_size,shrinkage_factor,time_decay_state,adaptive_weight,sample_count "
-                 "FROM altstrategy.strategy_posteriors")) {
+                 "FROM altstrategy.strategy_posteriors WHERE COALESCE(evidence_version, 1) >= $1::int",
+                 min_evidence_version)) {
             StrategyPosterior p;
             p.strategy_id = row[0].as<std::string>(); p.strategy_version = row[1].as<std::string>();
             p.parameter_set_id = row[2].as<std::string>(); p.regime = row[3].as<std::string>();
@@ -795,7 +977,7 @@ bool DecisionStore::save_parameter_set(const std::string& strategy_id, const std
 }
 
 std::map<std::string, engine::CalibrationTargets>
-DecisionStore::load_calibration_targets(int64_t from_ms) {
+DecisionStore::load_calibration_targets(int64_t from_ms, int min_plan_geometry_version) {
     std::map<std::string, engine::CalibrationTargets> out;
     read_txn(pool_, "save_parameter_set", [&](pqxx::work& txn) {
         // Predicted comes from what the plan promised, actual from what the
@@ -813,11 +995,12 @@ DecisionStore::load_calibration_targets(int64_t from_ms) {
                  " count(*) "
                  "FROM altstrategy.trade_signal_proposals p "
                  "JOIN altstrategy.market_outcomes o ON o.signal_proposal_id=p.signal_proposal_id "
-                 " AND NOT o.is_counterfactual AND o.outcome <> 'ENTRY_NOT_REACHED' "
+                 " AND NOT o.is_counterfactual AND o.outcome IN ('TARGET_FIRST','STOP_FIRST','TIME_STOP') "
                  "WHERE p.created_at_ms >= $1 AND p.stop_distance_bps > 0 "
                  " AND p.stop_distance_bps <= 1000 AND p.strategy_id <> '' "
+                 " AND COALESCE(p.plan_geometry_version, 1) >= $2::int "
                  "GROUP BY 1",
-                 from_ms)) {
+                 from_ms, min_plan_geometry_version)) {
             engine::CalibrationTargets t;
             const auto num = [&](int i) { return row[i].is_null() ? 0.0 : row[i].as<double>(); };
             t.predicted_mae = num(1);   t.actual_mae = num(2);
@@ -853,7 +1036,7 @@ std::map<std::string, ParamValues> DecisionStore::load_param_sets() {
 }
 
 std::map<std::string, std::pair<std::string, engine::DriftInputs>>
-DecisionStore::load_drift_inputs(int64_t from_ms, int64_t split_ms) {
+DecisionStore::load_drift_inputs(int64_t from_ms, int64_t split_ms, int min_plan_geometry_version) {
     std::map<std::string, std::pair<std::string, engine::DriftInputs>> out;
     // Candidate frequency is normalised by the number of decision contexts each
     // window offered, not by elapsed time — see the `ctx` CTE below. Elapsed
@@ -872,12 +1055,16 @@ DecisionStore::load_drift_inputs(int64_t from_ms, int64_t split_ms) {
             "         c.adaptive_score, c.bitget_regime, p.canonical_pair_id,"
             "         o.realized_net_return AS net, o.mfe, o.mae, o.holding_time_ms,"
             "         (o.outcome IS NOT NULL) AS resolved,"
-            "         (o.outcome IS NOT NULL AND o.outcome <> 'ENTRY_NOT_REACHED') AS filled"
+            // A position held to a resolution: an ENTRY_EXPIRED (or, from
+            // evaluator 2, AMBIGUOUS) carries no return, and counting it as
+            // filled put its 0.0 into every win rate below.
+            "         (o.outcome IN ('TARGET_FIRST','STOP_FIRST','TIME_STOP')) AS filled"
             "  FROM altstrategy.trade_signal_proposals p"
             "  LEFT JOIN altstrategy.strategy_candidates c ON c.candidate_id = p.candidate_id"
             "  LEFT JOIN altstrategy.market_outcomes o"
             "    ON o.signal_proposal_id = p.signal_proposal_id AND NOT o.is_counterfactual"
             "  WHERE p.created_at_ms >= $1 AND p.proposal_grade <> 'INVALID'"
+            "    AND COALESCE(p.plan_geometry_version, 1) >= $3::int"
             "    AND p.stop_distance_bps > 0 AND p.stop_distance_bps <= 1000),"
             "reg AS (SELECT strategy_id, recent, avg(m) v,"
             "               coalesce(stddev_samp(m),0) sd, count(*) k FROM ("
@@ -930,7 +1117,7 @@ DecisionStore::load_drift_inputs(int64_t from_ms, int64_t split_ms) {
             "LEFT JOIN ctx cb ON NOT cb.recent "
             "LEFT JOIN ctx cr ON cr.recent "
             "GROUP BY w.strategy_id",
-            from_ms, split_ms);
+            from_ms, split_ms, min_plan_geometry_version);
         for (const auto& row : res) {
             engine::DriftInputs in;
             in.baseline_candidate_freq = row[2].as<double>();
@@ -982,7 +1169,7 @@ std::vector<AttributionWork> DecisionStore::load_unattributed(int limit) {
                  // under the old broken stop geometry is not a measurement of
                  // anything, and attributing it only launders it into analysis.
                  "    AND p.stop_distance_bps > 0 AND p.stop_distance_bps <= 1000"
-                 "    AND o.outcome <> 'ENTRY_NOT_REACHED' LIMIT $1) "
+                 "    AND o.outcome IN ('TARGET_FIRST','STOP_FIRST','TIME_STOP') LIMIT $1) "
                  "SELECT p.candidate_id,COALESCE(p.ranking_id,''),p.canonical_pair_id,p.plan_version,"
                  "p.signal_proposal_id,COALESCE(p.round_trip_cost_bps,0),"
                  "COALESCE(p.expected_net_return,0),(a.attribution_id IS NULL),"
@@ -994,7 +1181,7 @@ std::vector<AttributionWork> DecisionStore::load_unattributed(int limit) {
                  "JOIN altstrategy.trade_signal_proposals p ON p.candidate_id=t.candidate_id "
                  "JOIN altstrategy.market_outcomes o"
                  "  ON o.signal_proposal_id=p.signal_proposal_id AND NOT o.is_counterfactual "
-                 "  AND o.outcome <> 'ENTRY_NOT_REACHED' "
+                 "  AND o.outcome IN ('TARGET_FIRST','STOP_FIRST','TIME_STOP') "
                  "LEFT JOIN altstrategy.outcome_attribution a"
                  "  ON a.signal_proposal_id=p.signal_proposal_id "
                  "LEFT JOIN altstrategy.strategy_candidates sc ON sc.candidate_id=p.candidate_id "

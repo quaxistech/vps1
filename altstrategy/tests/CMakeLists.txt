@@ -13,8 +13,10 @@ add_executable(altstrategy_engine_tests
     unit/test_engine_strategies.cpp
     unit/test_engine_ranking.cpp
     unit/test_engine_plan_proposal.cpp
+    unit/test_engine_plan_units.cpp
     unit/test_engine_ml_evaluation.cpp
     unit/test_engine_outcomes.cpp
+    unit/test_engine_outcomes_v2.cpp
     unit/test_engine_cost_model.cpp
     unit/test_engine_economic_policy.cpp
     unit/test_engine_integration.cpp)
@@ -27,6 +29,17 @@ add_executable(altstrategy_io_tests
     unit/test_wire_contract.cpp)
 target_link_libraries(altstrategy_io_tests PRIVATE altstrategy_engine_io altstrategy_proto Catch2::Catch2WithMain)
 catch_discover_tests(altstrategy_io_tests)
+
+# Against a real PostgreSQL 16 and a real JetStream, both created for the run in
+# a temporary directory (PGBIN = the server binaries, nats-server on PATH);
+# without them the cases SKIP. Publication after archive (BUG-01/02).
+add_executable(altstrategy_integration_tests integration/test_publication_outbox.cpp)
+target_include_directories(altstrategy_integration_tests PRIVATE unit)
+target_compile_definitions(altstrategy_integration_tests PRIVATE
+    ALTSTRATEGY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(altstrategy_integration_tests PRIVATE
+    altstrategy_engine_io altstrategy_engine Catch2::Catch2WithMain)
+catch_discover_tests(altstrategy_integration_tests PROPERTIES LABELS integration)
 
 # Hand-assembled parameterised SQL is validated only by the database at runtime.
 # A 67-column INSERT once shipped with 68 placeholders and the whole suite still

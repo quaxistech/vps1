@@ -174,7 +174,10 @@ struct MarketForecastView {
     double p_up = 0, p_down = 0;
     double expected_return = 0;              // point estimate, after-fee basis
     double probability_target_before_stop = 0;
-    double expected_mfe = 0, expected_mae = 0;
+    // AltML's legacy excursions: RETURN FRACTIONS (0.01 = 1 %) in the LONG
+    // perspective (mae <= 0). Not bps, and not this candidate's side -- see
+    // units.hpp; plan geometry reads the per-side bps magnitudes below.
+    double expected_mfe_long_fraction = 0, expected_mae_long_fraction = 0;
     double expected_holding_time_min = 0;
 
     // NOT an uncertainty estimate. AltML defines it as |p_up - 0.5| * 2, a
@@ -223,6 +226,9 @@ struct MarketForecastView {
     std::string policy_version;
     // Expected favourable / adverse excursion over the horizon, per side, in
     // bps of the entry price (adverse <= 0). Magnitudes, not probabilities.
+    // has_side_bps: all four were on the wire and finite -- an absent field
+    // decodes as 0.0, which would read as "no move expected".
+    bool has_side_bps = false;
     double favorable_long_bps = 0, adverse_long_bps = 0;
     double favorable_short_bps = 0, adverse_short_bps = 0;
 
@@ -273,6 +279,10 @@ struct HorizonPrediction {
     bool probability_calibrated = false;
     double p_up = 0, p_flat = 0, p_down = 0;
     double expected_return_bps = 0;
+    // Whether the forecast carried magnitudes at all (schema 4 excursions or
+    // schema 3 per-side bps). Without them the two below are 0 by default,
+    // not an expectation of no move.
+    bool has_excursions = false;
     double expected_up_excursion_bps = 0;     // >= 0: how far above the reference
     double expected_down_excursion_bps = 0;   // >= 0: how far below the reference
     int64_t bar_open_time_ms = 0;
@@ -390,6 +400,12 @@ struct DecisionContext {
     std::map<int32_t, MarketForecastView> forecasts;
 
     double fees_bps = 4.0;
+    // The venue's official price grid in force at event time (AltSpotter
+    // instrument_spec_versions, `valid_from <= T0`, newest first -- the rule
+    // the Gateway attaches to the signal). 0 = no spec resolved; the plan then
+    // derives a tick from the price magnitude and the proposal says so.
+    double price_tick = 0;
+    int64_t instrument_spec_version = 0;
     double funding_rate = 0;
     double mark_price = 0;
     double index_price = 0;
@@ -453,7 +469,7 @@ struct MlEvaluation {
     // as zeros nobody set, and a zero for `ood` asserts "in distribution".
     double p_target_before_stop = 0;
     double expected_net_return = 0;          // after-fee basis, per AltML
-    double expected_mfe = 0, expected_mae = 0;
+    double expected_mfe_long_fraction = 0, expected_mae_long_fraction = 0;
     double expected_holding_time_min = 0;
     // |p_up - 0.5| * 2. Distance from a coin flip, NOT an uncertainty estimate.
     double conviction = 0;
@@ -596,6 +612,14 @@ struct TradePlanVariant {
     bool post_only_allowed = false;
     double max_slippage_bps = 0;
     HoldingClass holding_class = HoldingClass::intraday;
+    // The grid the prices were rounded to, and where it came from:
+    // "instrument_spec" (the venue's, at T0), "config", or "derived" (a guess
+    // from the price magnitude -- never presented as the venue's).
+    double tick_size = 0;
+    std::string tick_source;
+    // Which plan-geometry definition produced the prices (trade_plan.hpp
+    // kPlanGeometryVersion). Rows written before it existed are version 1.
+    int geometry_version = 0;
 };
 
 // ------------------------------ Proposal (§8.3, §9) -------------------------
@@ -642,6 +666,9 @@ struct TradeSignalProposal {
     double optional_secondary_target = 0;
     std::string target_basis;
     double target_distance_bps = 0;
+    // The plan-geometry definition behind these prices (kPlanGeometryVersion);
+    // archived, not on the wire.
+    int plan_geometry_version = 0;
 
     int64_t expected_holding_time_p50_ms = 0;
     int64_t expected_holding_time_p90_ms = 0;
@@ -738,6 +765,14 @@ struct MarketOutcome {
     // stops meaning anything -- see db/migrations/0005.
     int cost_model_version = 0;
     double round_trip_cost_bps = 0;
+    // Which evaluator produced it (outcomes.hpp; 0 = the legacy one, written
+    // before this was recorded), the fill assumptions it applied, why it
+    // resolved as it did, and the resolution and completeness of its path.
+    int evaluator_version = 0;
+    std::string fill_model;
+    std::string resolution;
+    int64_t path_bar_ms = 0;
+    int32_t path_gap_count = 0;
 };
 
 struct ExecutionFeedback {
@@ -814,6 +849,8 @@ struct StrategyPosterior {
     double adaptive_weight = 1;
     int64_t sample_count = 0;
     int64_t updated_at_ms = 0;
+    // The minimum plan-geometry version of the outcomes behind it (QUALITY-05).
+    int evidence_version = 1;
 };
 
 struct StrategyDrift {

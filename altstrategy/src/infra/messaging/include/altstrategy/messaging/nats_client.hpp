@@ -5,8 +5,10 @@
 #include <nats.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -59,6 +61,14 @@ private:
     natsSubscription* sub_ = nullptr;
 };
 
+// What JetStream acknowledged for a publish: the stream sequence that now holds
+// the message, and whether the stream recognised its Nats-Msg-Id as one it
+// already holds (a re-send inside the duplicate window -- still durable).
+struct JsAck {
+    uint64_t sequence = 0;
+    bool duplicate = false;
+};
+
 // Thread-safe NATS client (nats.c is internally thread-safe). Reconnects
 // automatically with unlimited attempts and buffered publishes.
 class NatsClient {
@@ -72,12 +82,14 @@ public:
     NatsClient(const NatsClient&) = delete;
     NatsClient& operator=(const NatsClient&) = delete;
 
-    // Core publish (fire-and-forget, buffered).
+    // Core publish (fire-and-forget, buffered): success means the client
+    // buffered it, not that any stream stored it.
     Result<void> publish(const std::string& subject, std::string_view bytes);
 
-    // JetStream publish with deduplication id; synchronous ack from the server.
-    Result<void> js_publish(const std::string& subject, std::string_view bytes,
-                            const std::string& msg_id, int64_t timeout_ms = 10000);
+    // JetStream publish with deduplication id; returns only once the stream
+    // acknowledged storing it.
+    Result<JsAck> js_publish(const std::string& subject, std::string_view bytes,
+                             const std::string& msg_id, int64_t timeout_ms = 10000);
 
     // Async core subscription; handler runs on the NATS delivery thread.
     Result<Subscription> subscribe(const std::string& subject, MsgHandler handler);
@@ -94,11 +106,21 @@ public:
 
 private:
     NatsClient() = default;
+    // The library's closed callback: the last one it queues for a connection.
+    static void on_closed(natsConnection* nc, void* closure);
 
     natsConnection* conn_ = nullptr;
     natsOptions* opts_ = nullptr;
     jsCtx* js_ = nullptr;
     std::atomic<bool> shutting_down_{false};
+    // The library calls back on its own thread, and the disconnected callback
+    // reads shutting_down_. Freed while that callback was still queued, it was
+    // read after release -- an intermittent crash of every process that
+    // stopped right after connecting (a refused start, 1 in 20). The
+    // destructor waits for the closed callback, queued after every other one.
+    std::mutex closed_mu_;
+    std::condition_variable closed_cv_;
+    bool closed_ = false;
     std::vector<std::unique_ptr<MsgHandler>> handlers_;
 };
 

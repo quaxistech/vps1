@@ -19,6 +19,7 @@ namespace altstrategy::engine_io {
 class DecisionStore;
 class MarketReader;
 class SnapshotExporter;
+class OutboxPublisher;
 class DecisionEngine;
 class MaintenanceScheduler;
 }
@@ -49,6 +50,9 @@ private:
     std::unique_ptr<engine_io::DecisionStore> store_;
     std::unique_ptr<engine_io::MarketReader> reader_;
     std::unique_ptr<engine_io::SnapshotExporter> exporter_;
+    // Declared after the store and NATS client it uses and before the engine
+    // that notifies it, so it is stopped in between.
+    std::unique_ptr<engine_io::OutboxPublisher> publisher_;
     std::unique_ptr<engine_io::DecisionEngine> engine_;
     std::unique_ptr<engine_io::MaintenanceScheduler> scheduler_;
     std::unique_ptr<messaging::Subscription> feedback_sub_;

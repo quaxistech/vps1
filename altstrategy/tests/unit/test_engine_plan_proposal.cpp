@@ -305,6 +305,31 @@ TEST_CASE("a worse book never estimates a faster passive fill") {
 }
 
 
+TEST_CASE("an unobserved tape or book never estimates a faster passive fill (HISTORY-10)",
+          "[plan][fill][regression]") {
+    // The unobserved trade intensity defaulted to a brisk 5 trades/min; the
+    // assembler states an absent book as a 10 bps spread over 5 000 USDT.
+    const auto passive = [](auto mutate) {
+        auto ctx = make_ctx();
+        mutate(ctx);
+        for (const auto& v : generate_plans(long_candidate(ctx), ctx, 1'000'000))
+            if (v.entry_type == EntryType::limit) return v;
+        FAIL("no passive variant");
+        return TradePlanVariant{};
+    };
+    const auto observed = passive([](DecisionContext&) {});
+    const auto no_tape = passive([](DecisionContext& c) { c.microstructure.values.erase("trade_intensity"); });
+    const auto no_book = passive([](DecisionContext& c) {
+        c.spread_observed = c.depth_observed = false;
+        c.spread_bps = 10.0;
+        c.top_depth_usdt = 5'000.0;
+    });
+    CHECK(no_tape.expected_fill_time_p50_min > observed.expected_fill_time_p50_min);
+    CHECK(no_book.expected_fill_time_p50_min > observed.expected_fill_time_p50_min);
+    CHECK(no_book.expected_fill_time_p90_min > observed.expected_fill_time_p90_min);
+    CHECK(no_book.entry_fill_timeout_ms >= observed.entry_fill_timeout_ms);
+}
+
 TEST_CASE("the economic verdict is a diagnostic: every state publishes, none recommends",
           "[policy][vps1][regression]") {
     auto ctx = make_ctx(100.0);

@@ -349,8 +349,10 @@ int main(int argc, char** argv) {
             if (arm != "none") ablate(*ctx, arm);
 
             const int64_t t0 = ctx->event_time_ms;
+            const double px = ctx->last_price();
+            book.observe(ctx->canonical_pair_id, px);
             const auto admit = [&](const std::string& id, Side side, int64_t horizon_ms) {
-                const bool ok = book.admit(ctx->canonical_pair_id, id, side, t0, horizon_ms);
+                const bool ok = book.admit(ctx->canonical_pair_id, id, side, t0, horizon_ms, px, ctx->atr()).admitted;
                 if (!ok) ++repeats[id];
                 return ok;
             };
@@ -419,7 +421,7 @@ int main(int argc, char** argv) {
                 sum.gross_bps_samples.push_back(gross_bps);
                 if (gross_bps >= 0) sum.gross_profit_bps += gross_bps;
                 else sum.gross_loss_bps += -gross_bps;
-                sum.sum_holding_min += outcome.holding_time_ms / 60'000.0;
+                sum.sum_holding_min += static_cast<double>(outcome.holding_time_ms) / 60'000.0;
                 if (net_bps > 0) ++sum.wins;
                 if (arm == "none")
                     all.push_back({c.strategy_id, to_string(c.strategy_family), t0, net_bps,

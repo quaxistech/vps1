@@ -21,6 +21,15 @@
 
 namespace altstrategy::engine_io {
 
+namespace {
+// How long after its time stop a proposal's path may still complete. Candles
+// settle within minutes and raw trades only ever disappear, so a path still
+// incomplete after this never will be: the proposal is recorded as
+// DATA_INCOMPLETE, with the reason, instead of being re-read every pass until
+// retention removes it.
+constexpr int64_t kIncompleteRecordAfterMs = 6LL * 3600 * 1000;
+} // namespace
+
 MaintenanceScheduler::MaintenanceScheduler(DecisionStore& store, MarketReader& reader,
                                            SnapshotExporter& exporter,
                                            altstrategy::messaging::NatsClient& nats, SchedulerConfig cfg)
@@ -30,10 +39,12 @@ MaintenanceScheduler::~MaintenanceScheduler() { stop(); }
 
 void MaintenanceScheduler::start() {
     if (running_.exchange(true)) return;
+    stop_requested_.store(false);
     thread_ = std::thread([this] { loop(); });
 }
 
 void MaintenanceScheduler::stop() {
+    stop_requested_.store(true);
     if (!running_.exchange(false)) return;
     if (thread_.joinable()) thread_.join();
 }
@@ -42,7 +53,7 @@ int MaintenanceScheduler::mature_outcomes(int64_t now_ms) {
     int matured = 0;
     const auto pending = store_.proposals_awaiting_outcome(now_ms);
     for (const auto& pp : pending) {
-        if (!running_.load()) break;   // shutting down: the rest waits for the next start
+        if (stop_requested_.load()) break;   // shutting down: the rest waits for the next start
         OutcomeGeometry g;
         g.side = pp.side; g.entry_type = pp.entry_type; g.entry_price = pp.entry_price;
         g.trigger_price = pp.trigger_price; g.stop_loss_price = pp.stop_loss_price;
@@ -53,21 +64,30 @@ int MaintenanceScheduler::mature_outcomes(int64_t now_ms) {
         // did not exist, so the struct default of 8.0 scored every outcome while
         // the proposal had been priced at a different figure entirely.
         g.cost_bps = pp.cost_bps;
-        // Read the market path over the full maturation window (entry + holding).
-        auto path = reader_.read_path(pp.canonical_pair_id, pp.created_at_ms, pp.time_stop_at_ms + 60'000);
+        // The path over the full maturation window (entry + holding), with
+        // its gaps, through evaluator version 2 (QUALITY-04).
+        const auto path = reader_.read_price_path(pp.canonical_pair_id, pp.created_at_ms,
+                                                  pp.time_stop_at_ms + 60'000);
         if (path.bars.empty()) continue;   // data not ready yet; retry next pass
-        auto outcome = reconstruct_outcome(g, path.bars, path.source, pp.candidate_id,
-                                           pp.signal_proposal_id, now_ms);
-        if (outcome.outcome == MarketOutcomeType::data_incomplete) continue;
+        auto outcome = reconstruct_outcome_v2(g, path, pp.candidate_id, pp.signal_proposal_id, now_ms);
+        // Incomplete now may complete later (a late minute); a proposal past
+        // the window the source still holds is recorded as incomplete rather
+        // than retried forever -- the reason is on the row.
+        if (outcome.outcome == MarketOutcomeType::data_incomplete &&
+            now_ms - pp.time_stop_at_ms < kIncompleteRecordAfterMs)
+            continue;
         outcome.cost_model_version = pp.cost_model_version;
         outcome.round_trip_cost_bps = pp.cost_bps;
-        if (store_.save_market_outcome(outcome)) {
+        // The outcome and its publication commit together; the outbox sends
+        // it to the stream (JetStream live sync for VPS2).
+        EnvelopeMeta m; m.canonical_pair_id = pp.canonical_pair_id; m.event_type = "market_outcome";
+        m.message_id = outcome.outcome_id;
+        const OutboxMessage publication{
+            "market_outcome:" + outcome.outcome_id, "market_outcome",
+            altstrategy::nats_subjects::market_outcome(std::to_string(pp.canonical_pair_id)),
+            encode_market_outcome(outcome, m), pp.signal_proposal_id, pp.candidate_id, now_ms};
+        if (store_.save_market_outcome(outcome, &publication)) {
             store_.mark_proposal_state(pp.signal_proposal_id, ProposalState::outcome_final, "matured", now_ms);
-            // Publish the market outcome (JetStream live sync for VPS2).
-            EnvelopeMeta m; m.canonical_pair_id = pp.canonical_pair_id; m.event_type = "market_outcome";
-            m.message_id = outcome.outcome_id;
-            nats_.publish(altstrategy::nats_subjects::market_outcome(std::to_string(pp.canonical_pair_id)),
-                          encode_market_outcome(outcome, m));
             ++matured;
         }
     }
@@ -78,7 +98,7 @@ int MaintenanceScheduler::mature_outcomes(int64_t now_ms) {
 int MaintenanceScheduler::record_candidate_market_outcomes(int64_t now_ms) {
     int written = 0, unresolved = 0;
     for (const auto& pc : store_.candidates_awaiting_market_outcome(now_ms, 500)) {
-        if (!running_.load()) break;
+        if (stop_requested_.load()) break;
         // One read covers every horizon: the reference bar plus four hours.
         // 1m candles, never the 1-second trade path: raw trades cover the
         // last ~6 h, so a candidate 4 h old used to get 1-second buckets
@@ -100,7 +120,7 @@ int MaintenanceScheduler::record_candidate_market_outcomes(int64_t now_ms) {
 int MaintenanceScheduler::attribute_outcomes(int64_t now_ms) {
     int attributed = 0, counterfactuals = 0;
     for (const auto& w : store_.load_unattributed()) {
-        if (!running_.load()) break;
+        if (stop_requested_.load()) break;
         if (w.variants.empty()) continue;
         // A regime change is read from our own record: the regime the candidate
         // was raised under versus the regime in force when the trade resolved.
@@ -154,9 +174,10 @@ int MaintenanceScheduler::scan_drift(int64_t now_ms) {
     // ACTIVE on evidence, which is why strategy_lifecycle and lifecycle_events
     // were both empty while a STRUCTURAL_BREAK strategy kept trading.
     const auto current = store_.load_lifecycle_overrides();
-    const auto posteriors = store_.load_posteriors();
-    for (const auto& [sid, entry] : store_.load_drift_inputs(from_ms, split_ms)) {
-        if (!running_.load()) break;
+    const auto posteriors = store_.load_posteriors(cfg_.min_plan_geometry_version);
+    for (const auto& [sid, entry] :
+         store_.load_drift_inputs(from_ms, split_ms, cfg_.min_plan_geometry_version)) {
+        if (stop_requested_.load()) break;
         const auto d = compute_drift(sid, entry.first, entry.second, now_ms);
         if (store_.save_drift(d)) ++written;
         if (d.status == DriftStatus::degraded || d.status == DriftStatus::structural_break) {
@@ -214,8 +235,9 @@ int MaintenanceScheduler::calibrate_strategy_parameters(int64_t now_ms) {
     // schema bound and moves it only a bounded fraction toward the observed
     // target, and it refuses outright below 30 samples — so this is a slow,
     // reversible nudge, not a refit.
+    if (!cfg_.calibration_enabled) return 0;
     const int64_t from_ms = std::max(now_ms - cfg_.calibration_window_ms, cfg_.learning_from_ms);
-    const auto targets = store_.load_calibration_targets(from_ms);
+    const auto targets = store_.load_calibration_targets(from_ms, cfg_.min_plan_geometry_version);
     if (targets.empty()) return 0;
     const auto current = store_.load_param_sets();
 
@@ -263,8 +285,11 @@ bool MaintenanceScheduler::run_snapshot_export(const std::string& kind, int64_t 
     // Publish the snapshot-created event (metadata only; artifacts move via rsync).
     log::info("snapshot_exported", {{"kind", kind}, {"snapshot_id", res->snapshot_id},
                                     {"signals", res->signal_count}, {"to_sequence", res->to_sequence}});
-    nats_.publish("archive.snapshot.created.v1", res->snapshot_id + "|" + res->manifest_hash + "|" +
-                                                     std::to_string(res->to_sequence));
+    // Metadata only: the snapshot itself is durable on disk and in the archive
+    // tables whether or not this notice reaches the bus.
+    if (!nats_.publish("archive.snapshot.created.v1", res->snapshot_id + "|" + res->manifest_hash + "|" +
+                                                          std::to_string(res->to_sequence)))
+        log::warn("snapshot_notice_publish_failed", {{"snapshot_id", res->snapshot_id}});
     return true;
 }
 
@@ -299,7 +324,8 @@ void MaintenanceScheduler::run_retention(int64_t now_ms) {
 // edge toward zero in proportion to how often the entry was simply not filled,
 // which is a property of the entry geometry, not of the strategy's edge.
 int MaintenanceScheduler::update_posteriors(int64_t now_ms) {
-    const auto samples = store_.load_outcome_samples(20000, cfg_.learning_from_ms);
+    const auto samples =
+        store_.load_outcome_samples(20000, cfg_.learning_from_ms, cfg_.min_plan_geometry_version);
     if (samples.empty()) return 0;
 
     engine::PosteriorEstimator estimator(cfg_.allocator);
@@ -361,6 +387,7 @@ int MaintenanceScheduler::update_posteriors(int64_t now_ms) {
         p.holding_class = s.holding_class;
         p.sample_count = static_cast<int64_t>(exact[exact_key].size());
         p.updated_at_ms = now_ms;
+        p.evidence_version = cfg_.min_plan_geometry_version;
         if (store_.save_posterior(p)) ++written;
 
         // The runtime lookup falls back from the exact cell to progressively
@@ -383,6 +410,7 @@ int MaintenanceScheduler::update_posteriors(int64_t now_ms) {
             g.holding_class = HoldingClass::unspecified;
             g.sample_count = static_cast<int64_t>(cell.n);
             g.updated_at_ms = now_ms;
+            g.evidence_version = cfg_.min_plan_geometry_version;
             if (store_.save_posterior(g)) ++written;
         };
         const std::string group_key = key({sid, s.regime, s.symbol_group});

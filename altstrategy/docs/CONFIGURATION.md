@@ -15,13 +15,21 @@ files — strategy parameter sets are versioned in the database.
 - `strategies` — `min_candidate_rr`, `candidate_ttl_sec`.
 - `adaptive_allocator` — `prior_strength` (Bayesian k), `edge_scale`,
   `weight_min/max`, `half_life_days`.
-- `ranking` — champion/challenger policy ids, `close_gap`.
+- `ranking` — not configurable: the policies (`champion_ml_v2`,
+  `challenger_static_v1`) and the close gap are compiled in.
 - `trade_plan` — `min_stop_bps`, `max_entry_timeout_sec`,
   `default_max_slippage_bps`, `max_holding_hours` (48).
 - `outcomes` — `bitget_exchange_id`, `candles_table`, `trades_table`,
-  `prefer_raw_trades`, `scan_interval_sec`.
+  `prefer_raw_trades`, `scan_interval_sec`, and the price-grid tables
+  `instrument_specs_table` / `pair_map_table`.
+- `publication` — the outbox publisher's `ack_timeout_ms` and `max_age_hours`
+  (dead-letter age).
+- `learning` — `min_plan_geometry_version` (1 or 2; anything else refuses to
+  start): the oldest plan geometry whose outcomes posteriors, drift, lifecycle
+  and calibration may learn from.
 - `execution_feedback` — subject, `required: false`.
-- `drift` / `calibration` / `lifecycle` — intervals, min samples, cooldown.
+- `drift` / `calibration` / `lifecycle` — intervals, min samples, cooldown;
+  `calibration.enabled` switches the parameter calibrator.
 - `training_snapshots` — `export_root`, `format` (csv|parquet), `interval_sec`,
   retention windows.
 - `resources` — `max_inflight_pairs`, `batch_db_writes`.

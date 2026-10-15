@@ -179,14 +179,33 @@ TEST_CASE("a real econ prediction round-trips into the decision context view") {
     CHECK(v.expected_down_excursion_bps == Catch::Approx(48.0));
     CHECK(v.magnitude_source == "regression");
     CHECK(v.model_role == "ACTIVE");
+    // The legacy pair keeps AltML's unit (a return fraction) under its own name.
+    CHECK(v.expected_mfe_long_fraction == Catch::Approx(0.007));
+    CHECK(v.expected_mae_long_fraction == Catch::Approx(-0.003));
+    // No per-side bps were sent: they are absent, not 0.
+    CHECK_FALSE(v.has_side_bps);
 
     // Schema 3 carries no calibration verdict: read as uncalibrated, and the
-    // excursions come from the long side's favourable / adverse fields.
+    // excursions come from the long side's favourable / adverse fields --
+    // only when all four were actually on the wire.
     p->set_prediction_schema_version(3);
     const auto s3 = altstrategy::engine_io::parse_altml_forecast(env.SerializeAsString());
     REQUIRE(s3.has_value());
     CHECK_FALSE(s3->view.probability_calibrated);
     CHECK_FALSE(s3->view.has_excursions);
+    CHECK_FALSE(s3->view.has_side_bps);
+    p->set_favorable_long_bps(70.0);
+    p->set_adverse_long_bps(-30.0);
+    p->set_favorable_short_bps(30.0);
+    const auto s3_partial = altstrategy::engine_io::parse_altml_forecast(env.SerializeAsString());
+    REQUIRE(s3_partial.has_value());
+    CHECK_FALSE(s3_partial->view.has_side_bps);   // adverse_short missing
+    p->set_adverse_short_bps(-70.0);
+    const auto s3_full = altstrategy::engine_io::parse_altml_forecast(env.SerializeAsString());
+    REQUIRE(s3_full.has_value());
+    CHECK(s3_full->view.has_side_bps);
+    CHECK(s3_full->view.favorable_short_bps == Catch::Approx(30.0));
+    CHECK(s3_full->view.adverse_short_bps == Catch::Approx(-70.0));
     p->set_prediction_schema_version(4);
 
     // A schema-2 message missing ANY of the econ fields is not an econ

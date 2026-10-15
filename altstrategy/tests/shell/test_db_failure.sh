@@ -52,9 +52,11 @@ locks() { psqlc -d altstrategy -At -c "SELECT count(*) FROM pg_locks WHERE lockt
 "$PGBIN/initdb" -D "$W/data" -A trust -U postgres --no-sync >/dev/null
 start_pg
 psqlc -q -c "CREATE ROLE altstrategy_app LOGIN" -c "CREATE DATABASE altstrategy OWNER altstrategy_app"
-for f in "$ROOT"/db/migrations/*.sql; do
-    PGOPTIONS='-c role=altstrategy_app' psqlc -d altstrategy -v ON_ERROR_STOP=1 -q -1 -f "$f" >/dev/null
-done
+# The real migrator, as a release is migrated: the service refuses a schema
+# whose ledger has not reached the version it writes.
+"$(dirname "$BIN")/altstrategy-db-migrate" \
+    --dsn "host=127.0.0.1 port=$PGPORT dbname=altstrategy user=altstrategy_app" \
+    --migrations "$ROOT/db/migrations" >/dev/null
 mkdir -p "$W/js" "$W/exports"
 systemd-run --user --quiet --unit="$TAG-nats" -p MemoryMax=256M nats-server -a 127.0.0.1 -p "$NATSPORT" -js -sd "$W/js"
 cp "$ROOT/config/common.example.yaml" "$W/common.yaml"

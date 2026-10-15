@@ -353,9 +353,17 @@ TEST_CASE("schema-3 excursions are read as magnitudes, schema-4 ones as publishe
     using namespace altstrategy::engine::test;
     auto ctx = make_ctx(100.0);
     auto& f = ctx.forecasts[60];
+    // Neither magnitude was on the wire: the prediction says so instead of
+    // reporting "no move expected".
+    auto h = horizon_prediction(ctx, 60, 1'000'050, EconomicPolicyConfig{}.max_forecast_age_ms);
+    CHECK(h.has_values());
+    CHECK_FALSE(h.has_excursions);
+    CHECK_FALSE(side_excursions(h, Side::long_).has_value());
+    f.has_side_bps = true;
     f.favorable_long_bps = 42.0;
     f.adverse_long_bps = -37.0;
-    auto h = horizon_prediction(ctx, 60, 1'000'050, EconomicPolicyConfig{}.max_forecast_age_ms);
+    h = horizon_prediction(ctx, 60, 1'000'050, EconomicPolicyConfig{}.max_forecast_age_ms);
+    CHECK(h.has_excursions);
     CHECK(h.expected_up_excursion_bps == Catch::Approx(42.0));
     CHECK(h.expected_down_excursion_bps == Catch::Approx(37.0));
     CHECK_FALSE(h.probability_calibrated);

@@ -106,6 +106,10 @@ void StrategyFunnel::merge(const StrategyFunnel& other) {
         c.geometry_rejected += o.geometry_rejected;
         c.horizon_refused += o.horizon_refused;
         c.repeat_within_horizon += o.repeat_within_horizon;
+        for (size_t i = 0; i < c.repeat_by_reset_atr.size(); ++i) {
+            c.repeat_by_reset_atr[i] += o.repeat_by_reset_atr[i];
+            c.readmitted_by_reset_atr[i] += o.readmitted_by_reset_atr[i];
+        }
         c.candidates += o.candidates;
         for (const auto& [state, n] : o.econ) c.econ[state] += n;
     }

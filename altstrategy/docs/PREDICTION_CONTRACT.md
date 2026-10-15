@@ -36,6 +36,35 @@ Field numbers refer to `proto/altml_forecast.proto`.
 Optional protobuf fields absent from a message are unavailable. Consumers must
 not replace absence with zero.
 
+## Units and sides (QUALITY-01/02)
+
+| fields | unit | perspective |
+|---|---|---|
+| `expected_return`, `expected_mfe`, `expected_mae` | return **fraction** (0.009 = 0.9 %) | the LONG side; `expected_mae` ≤ 0 |
+| `favorable_*_bps`, `adverse_*_bps`, `expected_up/down_excursion_bps`, `*_bps` | basis points | as named |
+
+All conversions go through `src/engine/include/altstrategy/engine/units.hpp`.
+Plan geometry 1 divided the fractions by 10 000 a second time, so a forecast
+0.9 % excursion became a 0.0001 % target -- rounded onto the entry and nudged
+one tick away -- and read the LONG excursions for both sides. Plan geometry 2
+(`kPlanGeometryVersion`, recorded on every plan variant and proposal) takes
+side-aware magnitudes in bps from the ACTIVE prediction only: a LONG reads up
+as favourable and down as adverse, a SHORT the reverse; schema 3 per-side
+values count only when all four are present and finite. A forecast without
+magnitudes, a SHADOW one, or an unspecified side shapes no level.
+
+Every price is put on the venue's tick at T0: the `instrument_spec_versions`
+row in force at the context's event time (`valid_from <= T0`, the newest; the
+higher version on a tie). Stops round away from the entry (ceil, in whole
+ticks), targets to the nearest tick, never closer than one. `tick_source`
+says which grid was used; a derived one adds the warning `TICK_SIZE_DERIVED`.
+A target that does not cover the estimated round-trip cost adds
+`PLAN_TARGET_BELOW_COST` (info) and is still published.
+
+`ml_conviction` on a proposal is `p_side − p_opposite` of the econ estimate
+(signed, [−1, 1]); the proto comment on tag 78 still says `|p_up − 0.5| · 2`
+(see the Gateway's SIGNAL_CONTRACT.md).
+
 ## Market-prediction semantics
 
 `model_role` is `ACTIVE` or `SHADOW`. `magnitude_source` states whether

@@ -25,13 +25,17 @@ delivery path:
 
 1. `strategy_engine` runs every **eligible** strategy → all candidates.
 2. `adaptive_strategy_allocator` attaches the Bayesian-shrunk posterior + weight.
-3. every candidate is archived and published (weak candidates are never hidden).
+3. the context is archived first -- a context that cannot be archived decides
+   nothing -- and every candidate goes on (weak candidates are never hidden).
 4. `strategy_ensemble` computes direction / agreement / family independence.
 5. `strategy_ranking` runs the **champion** and the **challenger** (shadow).
 6. the recommended candidate → three `trade_plan` geometries.
 7. each geometry → `altml_candidate_evaluator` (bounded; degrades to a
    deterministic estimate on timeout) → `proposal_publisher`.
-8. proposals are archived; non-INVALID ones are published.
+8. one transaction per candidate archives it, its plans, its proposals and the
+   outbox messages of the non-INVALID ones; the outbox publisher sends them
+   after the commit and only marks what the stream acknowledged
+   ([NATS.md](NATS.md)).
 
 Stage latencies (`context_to_candidates`, `candidates_to_ranking`,
 `ranking_to_plans`, `plan_to_altml`, `altml_to_proposal`, `context_to_proposal`)
@@ -51,6 +55,14 @@ of these jobs depend on a downstream consumer.
 - Degraded (process stays up, live pipeline continues): AltML unavailable, the external consumer
   unavailable, one strategy exception, outcome backlog, snapshot-export failure.
   AltML timeouts yield an `ML_UNAVAILABLE` warning + deterministic proposal.
+- NATS unavailable: decisions are still archived; their messages wait in the
+  outbox and go out when the stream is back. PostgreSQL unavailable: a decision
+  is retried for a dropped connection, otherwise logged (`decision_not_archived`)
+  and published nowhere. A ranking that cannot be archived is retried the same
+  way; failing that, the proposals it ranked are published naming no ranking
+  (`rankings_not_archived` in `decision_output_failures`).
+- A schema older than the one this binary writes (`schema_not_migrated`):
+  the service refuses to start rather than run and archive nothing.
 
 ## Code layout
 

@@ -12,6 +12,7 @@
 #include "altstrategy/engine/decision_types.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace altstrategy::engine {
@@ -25,5 +26,25 @@ inline constexpr int32_t kServedHorizons[] = {15, 60, 240};
 
 [[nodiscard]] std::vector<HorizonPrediction> market_predictions(const DecisionContext& ctx, int64_t now_ms,
                                                                 int64_t max_forecast_age_ms);
+
+// The candidate's prediction on its own evaluation horizon (econ.horizon_minutes),
+// in whatever state it is; nullptr when the candidate carries none.
+[[nodiscard]] const HorizonPrediction* evaluation_prediction(const StrategyCandidate& c);
+
+// The same prediction when it is fit to shape a plan: fresh, complete and from
+// an ACTIVE model -- the condition the grade calls NORMAL. A missing, stale,
+// incomplete, abstained, incompatible or SHADOW forecast shapes nothing; it is
+// reported on the signal, never turned into a geometry nobody estimated.
+[[nodiscard]] const HorizonPrediction* geometry_prediction(const StrategyCandidate& c);
+
+// A prediction's excursions seen from one side of the trade, in bps (>= 0):
+// LONG is favoured by the up excursion and hurt by the down one, SHORT the
+// other way round. Absent when the forecast carried no magnitudes or the side
+// is unspecified -- never a zero standing in for "no move".
+struct SideExcursions {
+    double favourable_bps = 0;
+    double adverse_bps = 0;
+};
+[[nodiscard]] std::optional<SideExcursions> side_excursions(const HorizonPrediction& h, Side side);
 
 } // namespace altstrategy::engine

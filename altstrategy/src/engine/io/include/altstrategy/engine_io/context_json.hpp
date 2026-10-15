@@ -135,7 +135,15 @@ inline std::string context_snapshot_json(const engine::DecisionContext& c) {
                return o + "}";
            }() +
            ",\"bitget_regime_view\":" + regime_json(c.bitget_regime) +
-           ",\"global_regime_view\":" + regime_json(c.global_regime) + "}";
+           ",\"global_regime_view\":" + regime_json(c.global_regime) +
+           // The venue grid the plans of this context were rounded to; absent
+           // when no instrument spec resolved at T0 (the plans then say
+           // tick_source = derived).
+           (c.price_tick > 0 ? ",\"price_grid\":" + json_of({{"tick_size", c.price_tick},
+                                                            {"instrument_spec_version",
+                                                             static_cast<double>(c.instrument_spec_version)}})
+                             : std::string()) +
+           "}";
 }
 
 } // namespace altstrategy::engine_io

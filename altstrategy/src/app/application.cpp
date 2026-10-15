@@ -8,6 +8,7 @@
 #include "altstrategy/engine_io/decision_store.hpp"
 #include "altstrategy/engine_io/maintenance_scheduler.hpp"
 #include "altstrategy/engine_io/market_reader.hpp"
+#include "altstrategy/engine_io/outbox_publisher.hpp"
 #include "altstrategy/engine_io/snapshot_exporter.hpp"
 #include "altstrategy/engine_io/wire_codec.hpp"
 #include "altstrategy/logging/logger.hpp"
@@ -149,6 +150,14 @@ bool Application::setup() {
     rcfg.candles_table = config::opt_str(out_cfg, "candles_table", "market_candles_1m");
     rcfg.trades_table = config::opt_str(out_cfg, "trades_table", "market_trades_raw");
     rcfg.prefer_raw_trades = config::opt_bool(out_cfg, "prefer_raw_trades", true);
+    rcfg.instrument_specs_table =
+        config::opt_str(out_cfg, "instrument_specs_table", rcfg.instrument_specs_table);
+    rcfg.pair_map_table = config::opt_str(out_cfg, "pair_map_table", rcfg.pair_map_table);
+
+    const YAML::Node pub_cfg = section(ctx_.service, "publication");
+    engine_io::OutboxPublisherConfig pcfg;
+    pcfg.ack_timeout_ms = config::opt_int(pub_cfg, "ack_timeout_ms", pcfg.ack_timeout_ms);
+    pcfg.max_age_ms = config::opt_int(pub_cfg, "max_age_hours", pcfg.max_age_ms / 3600000) * 3600000;
 
     engine_io::ExporterConfig ecfg;
     ecfg.export_root = config::opt_str(exp_cfg, "export_root", "/var/lib/altstrategy/exports/signal-quality");
@@ -249,8 +258,21 @@ bool Application::setup() {
         }
         dcfg.plan.extended_max_ms = configured_ms;
     }
+    // QUALITY-05: which plan geometry learning may draw on. Read before the
+    // engine exists, because the engine loads posteriors by it too.
+    const YAML::Node learn_cfg = section(ctx_.service, "learning");
+    const int min_geometry = static_cast<int>(
+        config::opt_int(learn_cfg, "min_plan_geometry_version", dcfg.min_plan_geometry_version));
+    if (min_geometry < 1 || min_geometry > engine::kPlanGeometryVersion) {
+        log::error("config_rejected", {{"key", "learning.min_plan_geometry_version"},
+                                       {"value", min_geometry},
+                                       {"max", engine::kPlanGeometryVersion}});
+        return false;
+    }
+    dcfg.min_plan_geometry_version = min_geometry;
     log::info("engine_configured",
               {{"half_life_days", dcfg.allocator.half_life_days},
+               {"min_plan_geometry_version", min_geometry},
                {"min_stop_bps", dcfg.plan.min_stop_bps},
                {"max_holding_hours", dcfg.plan.extended_max_ms / 3600000},
                {"candidate_ttl_sec", dcfg.strategy.candidate_ttl_ms / 1000},
@@ -264,9 +286,22 @@ bool Application::setup() {
                                       dcfg.universe_subjects);
 
     store_ = std::make_unique<engine_io::DecisionStore>(*pool_);
+    // Forward only: the schema must already be the one this binary writes.
+    // Versions are four-digit and zero-padded, so they compare as text.
+    const auto migrated = store_->newest_schema_migration();
+    if (!migrated || *migrated < engine_io::kRequiredSchemaMigration) {
+        log::critical("schema_not_migrated",
+                      {{"required", std::string(engine_io::kRequiredSchemaMigration)},
+                       {"applied", migrated ? (migrated->empty() ? std::string("no ledger") : *migrated)
+                                            : std::string("unreadable")},
+                       {"message", "run altstrategy-db-migrate before starting this release"}});
+        return false;
+    }
     reader_ = std::make_unique<engine_io::MarketReader>(*pool_, rcfg);
     exporter_ = std::make_unique<engine_io::SnapshotExporter>(*pool_, ecfg);
-    engine_ = std::make_unique<engine_io::DecisionEngine>(*nats_, *store_, dcfg);
+    publisher_ = std::make_unique<engine_io::OutboxPublisher>(*store_, *nats_, pcfg);
+    engine_ = std::make_unique<engine_io::DecisionEngine>(*nats_, *store_, *publisher_, dcfg);
+    engine_->set_price_tick_source([reader = reader_.get()] { return reader->read_price_ticks(); });
     engine_->set_session_seed_source([reader = reader_.get()](int64_t pair, int64_t from, int64_t to) {
         std::vector<engine_io::SessionMinute> out;
         for (const auto& m : reader->read_volume_minutes(pair, from, to))
@@ -301,8 +336,13 @@ bool Application::setup() {
         config::opt_int(maint_cfg, "retention_interval_ms", scfg.retention_interval_ms);
     scfg.export_enabled = config::opt_bool(maint_cfg, "export_enabled", scfg.export_enabled);
     const YAML::Node lc_cfg = section(ctx_.service, "lifecycle");
-    scfg.learning_from_ms =
-        config::opt_int(section(ctx_.service, "learning"), "from_ms", scfg.learning_from_ms);
+    scfg.learning_from_ms = config::opt_int(learn_cfg, "from_ms", scfg.learning_from_ms);
+    scfg.min_plan_geometry_version = min_geometry;
+    // `calibration:` was in the YAML and read by nobody.
+    const YAML::Node cal_cfg = section(ctx_.service, "calibration");
+    scfg.calibration_enabled = config::opt_bool(cal_cfg, "enabled", scfg.calibration_enabled);
+    scfg.calibration_min_samples =
+        config::opt_int(cal_cfg, "min_samples", scfg.calibration_min_samples);
     scfg.lifecycle_min_samples =
         config::opt_int(lc_cfg, "min_samples", scfg.lifecycle_min_samples);
     scfg.lifecycle_cooldown_ms =
@@ -313,6 +353,8 @@ bool Application::setup() {
                {"lifecycle_min_samples", scfg.lifecycle_min_samples},
                {"learning_from_ms", scfg.learning_from_ms},
                {"lifecycle_cooldown_h", scfg.lifecycle_cooldown_ms / 3600000},
+               {"calibration_enabled", scfg.calibration_enabled},
+               {"calibration_min_samples", scfg.calibration_min_samples},
                {"edge_scale", scfg.allocator.edge_scale}});
 
     // The lifecycle pass must read the same starting status the decision path
@@ -346,6 +388,9 @@ int Application::run() {
         feedback_sub_ = std::make_unique<messaging::Subscription>(std::move(*sub));
     }
 
+    // The publisher first: what an earlier run committed and never sent goes
+    // out before anything new is decided.
+    publisher_->start();
     if (!engine_->start()) { log::critical("engine_start_failed", {}); return 1; }
     scheduler_->start();
 
@@ -369,6 +414,8 @@ int Application::run() {
 
     notify_stopping();
     scheduler_->stop();
+    // Anything still unsent stays in the outbox for the next start.
+    publisher_->stop();
     if (nats_) nats_->drain(3000);
     log::info("service_stopped", {{"exit_code", exit_code_.load()}});
     return exit_code_.load();
