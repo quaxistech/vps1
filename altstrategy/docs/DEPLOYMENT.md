@@ -75,3 +75,29 @@ learning epoch begins once. With `calibration.enabled: false` the sets then
 stay fixed until a decision taken on outcomes of geometry 2.
 
 There is no downgrade path: this release only moves forward.
+
+### Deployed 2026-10-15
+
+Built locally from commit `11760fa` (altstrategy archive sha256 `22de6752…`,
+service binary `306c58fe…`; AltSignalQuality archive `160d4bb3…`, binary
+`d1ce55ed…`); local gates altstrategy 202/202, AltSignalQuality 143/143.
+
+- Steps 1–5: ledger 0010 → 0013 at 20:55:22 UTC (checksums equal the
+  repository; a rerun applied nothing); 28 instrument-spec rows for 27 pairs;
+  duplicate window 86 400 s, the rest of the stream unchanged; configuration
+  sha256 `eee3355c…`; 15 calibrated sets rolled back, one active set per
+  strategy.
+- Step 6: altstrategy running since 22:25:13 UTC, `open_hypotheses_restored`
+  36. Step 7: AltSignalQuality since 22:27:22 UTC.
+- First 22 minutes: 48 proposals, all geometry 2 on the venue tick grid; no
+  off-grid price, side violation or target under 5 bps; ML targets equal the
+  side's own excursion (ratio 1.003 LONG, 0.993 SHORT). Outbox: 279 rows acked
+  on the first attempt, none owed or dead-lettered. Gateway sequences
+  27063–27078 contiguous and ACKED by VPS2. No error in either journal.
+- `MISSING_FEATURES`: right after the restart every evaluation lacked the
+  `htf_*` members (no higher-timeframe bar had closed yet); from the first
+  30m close the count fell to 2–4, and the remaining reasons are real
+  cross-venue gaps (`xv_rsi_dispersion`, `xv_volatility_agreement`; absent in
+  11 % of the preceding 14 days).
+- Not redeployed: AltML (behaviour-neutral refactor) and the Gateway
+  (documentation only; its NATS client keeps the teardown race fixed here).
