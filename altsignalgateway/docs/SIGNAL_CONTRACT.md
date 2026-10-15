@@ -180,18 +180,61 @@ AltML's contribution, or an explicit statement that there was none.
 | `absence_reason` | string | when absent | — | e.g. `NO_MODEL_VERSIONS_ON_PROPOSAL` |
 | `model_versions` | repeated string | when present | DECISION | the models that contributed |
 | `abstain` | bool | when present | DECISION | the model declined to forecast |
-| `uncertainty` | double | when present | DECISION | AltML's own uncertainty score |
-| `ood_score` | double | when present | DECISION | out-of-distribution score |
+| `conviction` | double | when present | DECISION | AltStrategy's `ml_conviction`, see below |
+
+Tags 5 and 6 (`uncertainty`, `ood_score`) are reserved: nothing ever produced
+them, and both were structurally zero on every signal.
 
 **The presence test is `model_versions` being non-empty** — AltStrategy's own
-record of a forecast having been attached to this plan.
+record of a forecast having been attached to this plan. A proposal without one
+carries protobuf defaults, not measurements; the block reports `present=false`
+instead.
 
-This matters on the deployed system. AltML currently has no ACTIVE model, so
-every proposal carries `ml_abstain=true, ml_uncertainty=0, ml_ood=0` — protobuf
-defaults, not measurements. Forwarding them would tell a consumer the model was
-certain and in-distribution when no model ran at all. The block reports
-`present=false` instead, and starts carrying real values the moment AltML is
-wired without any change here.
+**What `conviction` is (verified in code, 2026-10-15).** For a proposal with an
+econ evaluation, AltStrategy sets `ml_conviction = p_side − p_opposite` of the
+econ estimate: signed, in [−1, 1], positive when the model favours the
+proposal's own side; its magnitude is AltML's own `confidence`,
+`|p_long − p_short|`. The comments on `gateway.proto` tag 7 and on
+`decision.proto` tag 78 still describe it as `|p_up − 0.5| · 2` -- the retired
+binary model's definition, non-negative. Correcting them changes the files VPS2
+vendors and pins by sha256 (`altsignal-intelligence` reads this checkout through
+`/home/quaxis/projects/altsignalgateway`), so it is done together with VPS2's
+re-vendoring; no wire byte changes.
+
+As of 2026-10-15 (registry, read-only) AltML serves ACTIVE econ models for
+15m, 1h and 4h. None has `probability_calibrated = true`.
+
+## Notes for the consumer (VPS2), 2026-10-15
+
+Read from VPS2's source, not changed there:
+
+- `altml_conviction` is declared in [0, 1] by `altsignal-intelligence`
+  (`feature_schema.cpp`), and a value outside its domain becomes missing
+  (`OUT_OF_RANGE`). Half of all econ proposals carry a negative conviction --
+  34 % of LONGs, 64 % of SHORTs (2026-10-01..14) -- so the feature is missing
+  on half the signals, lopsidedly the SHORTs. The fix is VPS2's: domain
+  [−1, 1] and the signed definition, a new feature-schema version.
+- Plan geometry 2 moves the plan features VPS2 reads, on purpose (the same
+  60 615 proposals, recorded geometry → geometry 2, p10 / p50 / p90):
+  `target_distance_bps` 0.0 / 59.6 / 249.9 → 24.6 / 83.7 / 250.9;
+  `stop_distance_bps` 18.2 / 47.3 / 94.9 → 21.3 / 55.7 / 114.0; `expected_rr`
+  0.00 / 1.41 / 4.64 → 0.59 / 1.49 / 4.42; VPS2's `stop_to_target_ratio` was
+  above its 1000 domain (missing) on 22.4 % and is never now. Targets below the
+  estimated cost: 31.4 % → 3.1 % (those carry `PLAN_TARGET_BELOW_COST`, info).
+  Anything VPS2 fitted on signals before the cut-over learnt the old geometry.
+- Warnings reach VPS2 only as a count (`strategy_warning_count`); the new codes
+  `PLAN_TARGET_BELOW_COST` and `TICK_SIZE_DERIVED` cannot be refused there.
+- `signal_quality.missing_feature_count` is unchanged in meaning; the reason
+  `MISSING_FEATURES` is now raised only for an undeclared gap
+  (AltSignalQuality's FEATURE_CONTRACT.md). VPS2 reads the count, not the reason.
+- No market outcome travels on this contract: AltStrategy's `MarketOutcome`
+  (evaluator 2, a virtual path outcome) stays inside VPS1, apart from anything
+  VPS2 measures or executes.
+- A redelivered signal keeps its `signal_id` and gets no new sequence here; a
+  same `signal_id` with different upstream bytes is an integrity violation,
+  kept first and refused loudly. An AltSignalQuality re-publish after a crash
+  later than its 2 h de-duplication window would be such a violation (its
+  envelope carries a fresh `published_at_ms`), never a second delivery.
 
 ---
 

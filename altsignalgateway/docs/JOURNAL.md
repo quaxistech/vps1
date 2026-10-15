@@ -5,11 +5,11 @@ to the external consumer; a signal not here was never promised. Everything else
 — the WebSocket queue, the session state, the in-flight batch — is a cache of
 this table, rebuilt from it after any restart.
 
-Schema: `db/migrations/0001_altsignalgateway_schema.sql`, inside the shared
-AltSpotter database next to `altstrategy` and `altsignalquality`. Not a separate
-database: every signal is enriched from AltStrategy's context snapshot and
-AltSpotter's instrument registry, and a separate database would put
-`postgres_fdw` on the hot path of every single signal.
+Schema: `db/migrations/0001_altsignalgateway_schema.sql`. In production it is
+a schema of the `altstrategy` database, next to the `altstrategy` schema whose
+context snapshots enrich every signal; AltSpotter's instrument registry and
+AltTech's catalogue are read through the `altspotter_ref` / `alttech_ref`
+foreign schemas (`postgres_fdw`, owned by `altsignalgateway_app`).
 
 ## `signal_journal`
 

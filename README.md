@@ -20,6 +20,15 @@ See [`altspotter/docs/vps1/VPS1_ARCHITECTURE.md`](altspotter/docs/vps1/VPS1_ARCH
 for the cross-service architecture. Build and deployment instructions live in
 each service directory.
 
+## Governance
+
+VPS1 is a production system, not a frozen one. Every change to what runs --
+a deployment, a migration, a configuration or lifecycle change, a model
+promotion, a restart -- is made only with the owner's explicit approval.
+Read-only inspection, offline research and replay do not change what runs, and
+research is how changes earn that approval. Builds happen on the development
+workstation, never on the host.
+
 Build outputs and release archives are excluded. Per-host `vps1.md` target
 files and the machine-local `altsecrets/` directory are also ignored; keep
 credentials and workstation notes there, outside Git history.
