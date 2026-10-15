@@ -76,6 +76,27 @@ inline constexpr int kMaxHorizonMinutes = 240;
     return std::nullopt;
 }
 
+// The registry objective of a horizon's model -- written by the trainer and
+// read back by inference, which derives the served horizon from it. One
+// definition: the retired trainer recorded a hard-coded objective while
+// training on the configured label, and nothing reconciled the two.
+inline constexpr std::string_view kObjectivePrefix = "multiclass:econ_class_";
+
+[[nodiscard]] inline std::string objective_of(std::string_view horizon) {
+    return std::string(kObjectivePrefix) + std::string(horizon);
+}
+
+[[nodiscard]] inline std::optional<int> objective_horizon_minutes(std::string_view objective) {
+    if (!objective.starts_with(kObjectivePrefix)) return std::nullopt;
+    return horizon_minutes(objective.substr(kObjectivePrefix.size()));
+}
+
+// Purge/embargo around a fold boundary: a label reads `horizon_minutes` of
+// future, so the gap is never shorter than the horizon, whatever is configured.
+[[nodiscard]] inline int64_t embargo_ms(int64_t configured_minutes, int horizon_minutes) {
+    return std::max<int64_t>(configured_minutes, horizon_minutes) * 60'000;
+}
+
 // ------------------------------------------------------------------- classes
 
 enum Class : int { kShort = 0, kNeutral = 1, kLong = 2 };

@@ -1710,10 +1710,6 @@ Result<CycleOutcome> run_cycle(persistence::PgPool& pool, const config::RuntimeC
 
 constexpr const char* kEconTrainerVersion = "native-econ-2.0.0";
 
-std::string econ_objective(std::string_view horizon) {
-    return "multiclass:econ_class_" + std::string(horizon);
-}
-
 struct EconLabelInfo {
     int64_t set_id = 0;
     int fee_model_version = 0;
@@ -2453,10 +2449,10 @@ Result<CycleOutcome> run_econ_horizon(persistence::PgPool& pool, const config::R
                                       const TrainerConfig& cfg, const EconData& d, size_t h,
                                       const econ::CostModelV2& cost_model, int fee_model_version) {
     const auto& hz = econ::kHorizons[h];
-    const std::string objective = econ_objective(hz.name);
+    const std::string objective = econ::objective_of(hz.name);
     const int64_t hold_ms = static_cast<int64_t>(hz.minutes) * 60'000;
     // Purge/embargo covers the horizon: a label reads hz.minutes of future.
-    const int64_t embargo_ms = std::max<int64_t>(cfg.embargo_minutes, hz.minutes) * 60'000;
+    const int64_t embargo_ms = econ::embargo_ms(cfg.embargo_minutes, hz.minutes);
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(cfg.econ_time_budget_sec);
 
@@ -3427,7 +3423,7 @@ void TrainerComponent::run_econ_schedule() {
     auto& cfg = impl_->cfg;
     auto& pool = *impl_->pool;
     std::vector<std::string> objectives;
-    for (const auto& h : cfg.econ_horizons) objectives.push_back(econ_objective(h));
+    for (const auto& h : cfg.econ_horizons) objectives.push_back(econ::objective_of(h));
     const auto recover = [&]() {
         int worst = 0;
         int64_t last = 0;

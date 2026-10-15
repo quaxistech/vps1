@@ -427,9 +427,8 @@ public:
         // this binary knows. A legacy direction model has no economic
         // estimate to offer; serving it would reintroduce the probability
         // AltStrategy no longer has a use for.
-        constexpr std::string_view kPrefix = "multiclass:econ_class_";
-        if (objective.rfind(kPrefix, 0) != 0) return refuse("objective_not_served");
-        const auto horizon = econ::horizon_minutes(std::string_view(objective).substr(kPrefix.size()));
+        if (!objective.starts_with(econ::kObjectivePrefix)) return refuse("objective_not_served");
+        const auto horizon = econ::objective_horizon_minutes(objective);
         if (!horizon) return refuse("unknown_horizon");
         if (recipe_version != recipe::kRecipeVersion) return refuse("recipe_version_unknown");
 

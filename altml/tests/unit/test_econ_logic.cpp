@@ -415,6 +415,23 @@ TEST_CASE("calibration: a malformed record is refused with a reason, never throw
       CHECK_FALSE(c->margin_bps.has_value()); }
 }
 
+TEST_CASE("the registry objective names the horizon the model is trained and served for (HISTORY-09)",
+          "[econ][registry][regression]") {
+    for (const auto& h : econ::kHorizons) {
+        const auto objective = econ::objective_of(h.name);
+        CHECK(objective.starts_with(econ::kObjectivePrefix));
+        REQUIRE(econ::objective_horizon_minutes(objective).has_value());
+        CHECK(*econ::objective_horizon_minutes(objective) == h.minutes);
+        // The purge/embargo is never shorter than the label's own horizon.
+        CHECK(econ::embargo_ms(30, h.minutes) == std::max<int64_t>(30, h.minutes) * 60'000);
+    }
+    CHECK(econ::embargo_ms(30, 240) == 240LL * 60'000);   // the 4h model: 4h, not the configured 30 min
+    CHECK(econ::embargo_ms(300, 60) == 300LL * 60'000);   // a wider configured gap is kept
+    CHECK_FALSE(econ::objective_horizon_minutes("binary:y_direction_15m").has_value());
+    CHECK_FALSE(econ::objective_horizon_minutes("multiclass:econ_class_2h").has_value());
+    CHECK_FALSE(econ::objective_horizon_minutes("econ_class_1h").has_value());
+}
+
 TEST_CASE("rank statistics: Spearman with ties and gaps, direction AUC", "[econ][magnitude][vps1]") {
     // Monotone -> 1, reversed -> -1, NaN pairs ignored, ties averaged.
     CHECK(econ::spearman({1, 2, 3, 4}, {10, 20, 30, 40}) == Approx(1.0));

@@ -18,9 +18,20 @@ on a rolling window using purged walk-forward validation, market-quality
 promotion gates, and champion-challenger comparison.
 
 AltML **never** publishes a trade signal, sends an order, or sets a
-stop-loss/take-profit — it only answers "what is the probability this bar
-moves up, down, or flat next". Everything downstream of that decision belongs
-to other services.
+stop-loss/take-profit. Everything downstream of a forecast belongs to other
+services.
+
+**What is deployed (registry, read-only, 2026-10-15).** `training.mode: econ`:
+one multiclass LightGBM per horizon, 15m, 1h and 4h (the retired `legacy`
+mode trained the 15-minute direction binary). Each answers "does a long, or a
+short, opened at T0 and closed at T0 + h clear the all-in cost?" (LONG / SHORT
+/ NEUTRAL, [econ_logic.hpp](src/altml/components/econ_logic.hpp)), with
+regression magnitudes for the excursions; predictions are `PredictionV1`
+schema 4. All three ACTIVE models read `recipe-1`: 132 features, a 44-member
+base projection plus Bitget's `talib-core:1` vectors on the aligned 15m and 1h
+grids (`aligned_sources` in `altml.model_feature_compatibility`).
+None reads AltTech's macro or cross-venue vectors, although both are
+published, and none is marked `probability_calibrated`.
 
 ```text
 altml run             the service: label-builder + trainer + model-registry +
