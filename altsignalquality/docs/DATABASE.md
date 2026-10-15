@@ -1,7 +1,9 @@
 # Database
 
-AltSignalQuality owns the `altsignalquality` PostgreSQL schema in the shared
-AltSpotter database. The ordered schema is defined by
+AltSignalQuality owns the `altsignalquality` PostgreSQL schema, in production
+in its own `altsignalquality` database; the AltStrategy tables it reads are
+`postgres_fdw` foreign tables in its local schema `altstrategy` (server
+`altstrategy_srv`). The ordered schema is defined by
 `db/migrations/0001_altsignalquality_schema.sql` and applied separately from
 service deployment.
 

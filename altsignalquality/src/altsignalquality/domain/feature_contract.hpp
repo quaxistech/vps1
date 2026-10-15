@@ -369,6 +369,15 @@ inline std::optional<double> bps_of(std::optional<double> value, std::optional<d
 // same vector out, on any host, in any order, forever.
 [[nodiscard]] FeatureVector assemble(const SignalSnapshot& s);
 
+// How many members are missing although the proposal did not declare them
+// absent. A proposal declares the forward-looking economics absent when no
+// model estimated an edge (`edge_estimated` false), and the target probability
+// when the model produced none -- AltStrategy's econ models never do. Those
+// members are NaN and counted in `missing_count` like any other gap, but they
+// are not a degraded input: MISSING_FEATURES, raised on any gap, was raised on
+// all 19 741 evaluations of 2026-10-01..15 for p_target_before_stop alone.
+[[nodiscard]] int32_t undeclared_missing_count(const FeatureVector& v, const CandidateSignal& c);
+
 // sha256 over "position|name|kind|source|availability" for every member. Two
 // contracts with the same hash are the same contract, member for member.
 [[nodiscard]] std::string feature_schema_hash();

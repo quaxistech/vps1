@@ -5,8 +5,10 @@
 #include <nats.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -97,11 +99,21 @@ public:
 
 private:
     NatsClient() = default;
+    // The library's closed callback: the last one it queues for a connection.
+    static void on_closed(natsConnection* nc, void* closure);
 
     natsConnection* conn_ = nullptr;
     natsOptions* opts_ = nullptr;
     jsCtx* js_ = nullptr;
     std::atomic<bool> shutting_down_{false};
+    // The library calls back on its own thread, and the disconnected callback
+    // reads shutting_down_: freed while that callback was still queued, it was
+    // read after release (an intermittent crash of a process stopping right
+    // after it connected). The destructor waits for the closed callback,
+    // queued after every other one.
+    std::mutex closed_mu_;
+    std::condition_variable closed_cv_;
+    bool closed_ = false;
     std::vector<std::unique_ptr<MsgHandler>> handlers_;
 };
 

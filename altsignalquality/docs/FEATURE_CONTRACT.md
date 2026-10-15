@@ -34,6 +34,21 @@ It is not zero-filled, mean-filled or carried forward. A categorical value
 outside the declared vocabulary is also missing. This preserves the difference
 between an observed zero and an unavailable value.
 
+`missing_feature_count` counts every missing member. The reason code
+`MISSING_FEATURES` is raised only for a member missing although the proposal
+did not declare it absent (`undeclared_missing_count`): a proposal without an
+edge estimate (`edge_estimated` false) declares `expected_net_return` and
+`net_edge_bps` absent, and one without a target probability declares
+`p_target_before_stop` and `rr_times_p_target` absent. AltStrategy's econ models
+produce no target-before-stop probability, so those two are absent on every
+proposal; when the reason was raised on any gap it was raised on all 19 741
+evaluations of 2026-10-01..15, and said nothing. The rest of that window's
+gaps: `stop_to_target_ratio` and `cost_to_target_ratio` on 21.7 % (targets
+rounded onto the entry, AltStrategy plan geometry 1; gone with geometry 2),
+`xv_rsi_dispersion` / `xv_volatility_agreement` 11.3 %,
+`micro_turnover_acceleration` 7.1 %, `micro_trade_imbalance` 5.7 %, the
+higher-timeframe members 0.15 % -- inputs genuinely unavailable at T0.
+
 ## Diagnostics
 
 Dataset diagnostics report observed and missing counts, summary statistics,

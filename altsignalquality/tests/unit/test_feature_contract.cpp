@@ -177,6 +177,37 @@ TEST_CASE("a fully populated snapshot leaves nothing missing") {
     REQUIRE(v.missing_count == 0);
 }
 
+TEST_CASE("a member the proposal declares absent is counted, but is not a missing input") {
+    // AltStrategy's econ models produce no target-before-stop probability, so
+    // p_target_before_stop -- and rr_times_p_target, built on it -- is absent on
+    // every proposal, and MISSING_FEATURES was raised on every evaluation.
+    auto s = full_snapshot();
+    s.candidate.p_target_before_stop.reset();
+    auto v = assemble(s);
+    CHECK(v.missing_count == 2);
+    CHECK(undeclared_missing_count(v, s.candidate) == 0);
+
+    // No edge estimated: the economics are declared absent as well.
+    s.candidate.edge_estimated = false;
+    v = assemble(s);
+    CHECK(v.missing_count == 4);
+    CHECK(undeclared_missing_count(v, s.candidate) == 0);
+
+    // An estimate that arrives unusable was not declared absent: it counts.
+    s.candidate.edge_estimated = true;
+    s.candidate.expected_net_return = std::numeric_limits<double>::quiet_NaN();
+    v = assemble(s);
+    CHECK(undeclared_missing_count(v, s.candidate) == 2);   // expected_net_return, net_edge_bps
+
+    // So does every gap in the market context.
+    s = full_snapshot();
+    s.candidate.p_target_before_stop.reset();
+    s.context = ContextSnapshot{};
+    v = assemble(s);
+    CHECK(undeclared_missing_count(v, s.candidate) == v.missing_count - 2);
+    CHECK(undeclared_missing_count(v, s.candidate) > 0);
+}
+
 TEST_CASE("an absent context makes exactly the context-derived features missing") {
     auto s = full_snapshot();
     s.context = ContextSnapshot{};  // not present

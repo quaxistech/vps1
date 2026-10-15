@@ -365,4 +365,18 @@ std::vector<std::string> lgbm_feature_names() {
     return names;
 }
 
+int32_t undeclared_missing_count(const FeatureVector& v, const CandidateSignal& c) {
+    // Exactly the gates assemble() applies to these four members.
+    const auto declared_absent = [&](std::string_view name) {
+        const bool target_probability = name == "p_target_before_stop" || name == "rr_times_p_target";
+        const bool edge = name == "expected_net_return" || name == "net_edge_bps";
+        if (!c.edge_estimated) return target_probability || edge;
+        return target_probability && !c.p_target_before_stop.has_value();
+    };
+    int32_t n = 0;
+    for (size_t i = 0; i < kFeatureCount; ++i)
+        if (!v.observed(i) && !declared_absent(kFeatures[i].name)) ++n;
+    return n;
+}
+
 } // namespace altsignalquality::domain

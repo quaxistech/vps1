@@ -510,7 +510,9 @@ void EvaluatorComponent::run() {
                                                have_score, scored.quality_score, threshold,
                                                model_unusable, stale,
                                                candidate.max_holding_time_ms);
-                if (features.missing_count > 0) {
+                // A gap the proposal did not declare; the declared ones are in
+                // missing_count, not in the reason.
+                if (domain::undeclared_missing_count(features, snapshot.candidate) > 0) {
                     decision.reason_codes.emplace_back("MISSING_FEATURES");
                 }
                 if (!ctx->snapshot.present) {
