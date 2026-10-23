@@ -65,8 +65,9 @@ struct LabelSetSpec {
     int warmup_minutes = 0;   // causal state before the anchor (ATR); 0 = none
     // A new set on a database whose candle history is months long does not
     // start at the first candle: labels older than the feature archive pair
-    // with nothing and would be retained only to be dropped. 0 = from the
-    // first candle (the historical behaviour of core-labels).
+    // with nothing, would be retained only to be dropped, and may have no
+    // partition at all. Both sets use labels::kLabelStoreDays; 0 = from the
+    // first candle.
     int backfill_days = 0;
     std::string kind;         // altml.label_definitions.kind
     bool core = false;
@@ -98,6 +99,10 @@ const LabelSetSpec& core_spec() {
         s.builder_version = "lb-1.0.0";
         s.max_horizon = 30;
         s.warmup_minutes = 14;
+        // Was 0 ("from the first candle"): AltSpotter's history now predates
+        // every label partition, so a new instrument's first label could not
+        // be written. The store floor, like econ-labels'.
+        s.backfill_days = labels::kLabelStoreDays;
         s.kind = "core";
         s.core = true;
         s.defs = label_defs();
@@ -114,7 +119,7 @@ const LabelSetSpec& econ_spec() {
         s.builder_version = "lb-econ-1.0.0";
         s.max_horizon = econ::kMaxHorizonMinutes;
         s.warmup_minutes = 0;
-        s.backfill_days = 41;   // the feature archive's 40-day target, plus one
+        s.backfill_days = labels::kLabelStoreDays;   // the feature archive's 40-day target, plus one
         s.kind = "econ";
         s.core = false;
         for (const auto& h : econ::kHorizons) {
@@ -133,10 +138,9 @@ const LabelSetSpec& econ_spec() {
 
 using LBar = labels::SourceBar;
 
-// Retention target is 150 days (see altml.retention_policies); keep a wide
-// forward margin so a stalled service never wakes up to a missing partition.
-constexpr int64_t kPartitionBackfillDays = 160;
-constexpr int64_t kPartitionLookaheadDays = 60;
+// The labels' window is labels::label_partition_window: far wider than their
+// 40-day retention target (altml.retention_policies), with a forward margin so
+// a stalled service never wakes up to a missing partition.
 // The feature archive is partitioned by DAY, so its window is counted in
 // partitions, not in calendar reach: 160 days back would mean 160 tables. It
 // needs only enough history to cover its own retention target plus margin.
@@ -145,8 +149,9 @@ constexpr int64_t kArchivePartitionLookaheadDays = 7;
 
 Result<void> ensure_data_partitions(persistence::PgPool& pool, int64_t now_ms) {
     const int64_t day_ms = 24LL * 3600 * 1000;
-    const int64_t from_ms = now_ms - kPartitionBackfillDays * day_ms;
-    const int64_t to_ms = now_ms + kPartitionLookaheadDays * day_ms;
+    const auto window = labels::label_partition_window(now_ms);
+    const int64_t from_ms = window.from_ms;
+    const int64_t to_ms = window.to_ms;
     return pool.with_txn([&](pqxx::work& txn) {
         txn.exec_params("SELECT altml.ensure_month_partitions('altml.labels', "
                         "to_timestamp($1::bigint / 1000.0), to_timestamp($2::bigint / 1000.0))",
@@ -399,14 +404,21 @@ public:
                 }
 
                 if (force_from_first_bar) {
+                    // The first ATR warmup boundary is the instrument's first
+                    // candle -- when the store can hold a label there. Older
+                    // than the floor it has no partition (the repair failed on
+                    // 2026-02-01 every pass since that history outgrew the
+                    // window) and nothing in the store to repair: no rows.
                     const auto first = txn.exec_params(
                         "SELECT (extract(epoch FROM min(open_time)) * 1000)::bigint "
                         "FROM altml.fdw_candles_1m WHERE exchange_id = 1 AND instrument_id = $1 "
                         "AND is_closed",
                         instrument_id);
-                    if (!first.empty() && !first[0][0].is_null()) {
-                        from_ms = first[0][0].as<int64_t>();
-                    }
+                    std::optional<int64_t> first_ms;
+                    if (!first.empty() && !first[0][0].is_null()) first_ms = first[0][0].as<int64_t>();
+                    from_ms = labels::initial_atr_repair_start_ms(
+                                  first_ms, labels::label_store_floor_ms(timeutil::now_ms(), spec_.backfill_days))
+                                  .value_or(0);
                 }
             });
             if (!res) return std::unexpected(res.error());
@@ -723,8 +735,18 @@ private:
 
     Result<int64_t> write_labels(const std::vector<LabelRow>& rows) {
         if (rows.empty()) return 0;
+        const auto [lo, hi] = std::minmax_element(rows.begin(), rows.end(), [](const LabelRow& a, const LabelRow& b) {
+            return a.bar_open_ms < b.bar_open_ms;
+        });
         auto res = pool_.with_txn([&](pqxx::work& txn) {
             txn.exec("SET LOCAL TIME ZONE 'UTC'");
+            // Retention drops a month once its upper bound passes the keep
+            // period, and the daily window check recreates it only later: the
+            // months these rows fall in exist before they are written
+            // (create-if-missing, the same service role as the daily check).
+            txn.exec_params("SELECT altml.ensure_month_partitions('altml.labels', "
+                            "to_timestamp($1::bigint / 1000.0), to_timestamp($2::bigint / 1000.0))",
+                            lo->bar_open_ms, hi->bar_open_ms);
             for (size_t off = 0; off < rows.size(); off += 500) {
                 const size_t end = std::min(rows.size(), off + 500);
                 std::string sql =

@@ -1,15 +1,60 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <vector>
 
 namespace altml::labels {
 
 constexpr int64_t kOneMinuteMs = 60'000;
+constexpr int64_t kOneDayMs = 86'400'000;
+
+// ---- the label store's horizon ------------------------------------------------
+// altml.labels is partitioned by month over the window ensure_data_partitions
+// provisions, and trimmed by retention (labels: a 40-day target). AltSpotter's
+// candle history is older than both (it starts 2026-02-01), so "the first
+// candle" is not a place a label can be written: an insert there finds no
+// partition. Every label the builder writes starts at the store floor.
+constexpr int kLabelPartitionBackfillDays = 160;
+constexpr int kLabelPartitionLookaheadDays = 60;
+constexpr int kLabelStoreDays = 41;   // the 40-day retention target, plus one
+
+// UTC month start, as altml.ensure_month_partitions floors its lower bound.
+[[nodiscard]] inline int64_t month_start_ms(int64_t ms) {
+    using namespace std::chrono;
+    const year_month_day ymd{floor<days>(sys_time<milliseconds>{milliseconds{ms}})};
+    return duration_cast<milliseconds>(sys_days{ymd.year() / ymd.month() / 1}.time_since_epoch()).count();
+}
+
+struct PartitionWindow {
+    int64_t from_ms = 0;   // the first provisioned month's start
+    int64_t to_ms = 0;     // provisioned through the month holding this instant
+};
+
+// The months ensure_data_partitions creates for altml.labels.
+[[nodiscard]] inline PartitionWindow label_partition_window(int64_t now_ms) {
+    return {month_start_ms(now_ms - kLabelPartitionBackfillDays * kOneDayMs),
+            now_ms + kLabelPartitionLookaheadDays * kOneDayMs};
+}
+
+[[nodiscard]] inline int64_t label_store_floor_ms(int64_t now_ms, int backfill_days) {
+    return now_ms - static_cast<int64_t>(backfill_days) * kOneDayMs;
+}
+
+// Where the one-time initial ATR repair recomputes from: the instrument's first
+// candle -- its first ATR warmup boundary -- when the store can hold a label
+// there. Older than the floor, the store holds no such boundary and there is
+// nothing to repair.
+[[nodiscard]] inline std::optional<int64_t> initial_atr_repair_start_ms(
+    std::optional<int64_t> first_candle_ms, int64_t floor_ms) {
+    if (!first_candle_ms || *first_candle_ms < floor_ms) return std::nullopt;
+    return first_candle_ms;
+}
 
 struct SourceBar {
     int64_t open_ms = 0;
