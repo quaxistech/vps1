@@ -174,6 +174,19 @@ journalctl -u alttech -f
 `alttech.service`. `alttech-maintenance.timer` runs hourly and keeps partitions
 rolled forward, retention enforced and storage measured.
 
+The target must be **enabled**, not only started: `alttech.service` is wanted
+by the target alone. On 2026-10-18 the host was reset with the target never
+enabled, AltTech stayed down and VPS1 published no signal for five days
+(enabled 2026-10-23). The installer (`deploy/vps-flat-install.sh`) now fails
+when the unit is not reachable from `multi-user.target`.
+
+`alttech-schema.service` currently fails at start with
+`schema_checksum_mismatch`: the database was applied from a `schema.sql` older
+than the one deployed on 2026-09-25. The service validates its own module
+schemas and runs; the unit fails because the tool has no migration path, and
+`--recreate` would drop every AltTech table. Bringing the schema to the
+deployed file is an open task.
+
 The service reports ready to systemd only after all five modules have validated
 their schemas and bound their subscriptions, so `systemctl start` returning
 success means the service can actually produce output.

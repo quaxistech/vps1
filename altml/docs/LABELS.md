@@ -6,6 +6,16 @@ bars > t). The catalog is frozen and versioned in `altml.label_set_versions`
 (name `core-labels`, version 1); changing the label definitions requires a new
 version, never an in-place edit of a frozen set.
 
+Labels are written only from the **label store floor** onwards
+(`labels::kLabelStoreDays`, 41 days: the 40-day retention target plus one;
+`label_quality.hpp`). AltSpotter's candle history is older than every
+`altml.labels` partition, so a new instrument starts at the floor, and the
+one-time initial-ATR repair touches an instrument's first candle only when
+the store can hold it — otherwise it completes with no rows (until
+2026-10-23 it failed on 2026-02-01 every minute). `write_labels` creates the
+months it writes into, so retention dropping a month the floor still reaches
+cannot fail a write.
+
 ## Catalog
 
 | Family | Labels | Horizons |
