@@ -118,7 +118,7 @@ cat <<EOF
 Release $RELEASE is staged but NOT installed. Install it with:
 
   $SSH $TARGET '
-    cp /tmp/alttech-deploy/stage-$RELEASE/lib/systemd/system/alttech* /etc/systemd/system/ && systemctl daemon-reload
+    cp /tmp/alttech-deploy/stage-$RELEASE/lib/systemd/system/alttech* /etc/systemd/system/ && systemctl daemon-reload && systemctl enable alttech.target
     /tmp/alttech-deploy/stage-$RELEASE/bin/alttech-schema --check --schema /tmp/alttech-deploy/stage-$RELEASE/share/alttech/schema.sql
     bash /tmp/alttech-deploy/vps-flat-install.sh alttech alttech.service bin/alttech-service /tmp/alttech-deploy/stage-$RELEASE
     rm -rf /tmp/alttech-deploy'

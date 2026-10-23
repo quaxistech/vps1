@@ -90,6 +90,13 @@ echo "exe=$EXE"
 [ "$EXE" = "$ROOT/$MAIN" ] && [ "$(readlink -f "$EXEC")" = "$ROOT/$MAIN" ] || { echo "MISMATCH"; exit 1; }
 echo "sha256=$(sha256sum "$EXE" | cut -c1-16)"
 
+# Running now is not enough: a unit nothing pulls in at boot stays down after
+# the next host reset (AltTech, 2026-10-18 to 10-23: alttech.target had never
+# been enabled, and VPS1 published no signal for five days).
+systemctl list-dependencies --plain --no-pager multi-user.target | grep -qx "[[:space:]]*$UNIT" ||
+    { echo "NOT STARTED AT BOOT: $UNIT is not reachable from multi-user.target (enable it or its target)"; exit 1; }
+echo "boot: $UNIT is started with multi-user.target"
+
 if [ -L "$ROOT/current" ] || [ -d "$ROOT/releases" ]; then
     rm -f "$ROOT/current"
     rm -rf "$ROOT/releases"
