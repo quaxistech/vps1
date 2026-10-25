@@ -23,6 +23,23 @@ AltSpotter exposes market data through:
 
 All venue-specific payloads are normalized before publication. Database migrations and protobuf definitions are the authoritative interface contracts.
 
+## Ownership, provenance and recovery
+
+AltSpotter owns normalized market history, instrument/venue identity, coverage,
+quality, revisions and retention. Its database includes market candles, raw and
+aggregated trades/books, derivatives context, BBO and service metadata; exact
+relations and keys are in [Database](docs/DATABASE.md). AltTech and other
+consumers read these contracts and never write the producer's tables.
+
+Exchange event, receipt and persistence times remain distinct. Missing values
+stay NULL/unset; an unavailable venue never supplies a fabricated zero or a
+price borrowed from another exchange. Book continuity/checksum and candle
+revision metadata qualify downstream use. Reconnect/backfill repairs run within
+bounded queues, storage budgets and persisted coverage/checkpoint semantics.
+Supervisor readiness, per-venue isolation and pressure degradation are described
+in [Architecture](docs/ARCHITECTURE.md) and [Data quality](docs/DATA_QUALITY.md).
+The service observes public markets only; it cannot trade or manage an account.
+
 ## Runtime
 
 The <code>altspotter</code> executable provides these commands:

@@ -5,7 +5,7 @@ AltTech turns the four-venue USDT-perpetual futures market data collected by
 feature vectors, microstructure, market structure and regimes, plus the
 cross-venue consensus over all four venues.
 
-One process, `alttech-service`, hosts five supervised modules:
+One process, `alttech-service`, hosts six supervised modules:
 
 | module | what it produces |
 |---|---|
@@ -13,6 +13,7 @@ One process, `alttech-service`, hosts five supervised modules:
 | `microstructure` | trade and order-book features over 1s…1m windows |
 | `structure` | support/resistance zones with a lifecycle |
 | `regime` | deterministic market regimes |
+| `macro` | point-in-time external-series features from AltMacro through read-only foreign tables |
 | `cross_venue` | event-time alignment, quality-weighted consensus, divergence, lead-lag, the global regime and the consensus zones projected onto the primary venue |
 
 **Bitget** is the single primary trading venue; **Binance USDⓈ-M**, **Bybit
@@ -30,6 +31,25 @@ The observed pair set is not configured. It is read from altspotter's global
 observation universe — the set of pairs active on all four venues — and AltTech
 never mixes two venues' candles into one synthetic bar.
 
+## Processing, configuration and recovery
+
+A closed-bar event waits for AltSpotter's matching durable bar/revision before
+feature computation; the feature vector commits before ACK. Other modules use
+bounded owner-read sweeps. Natural keys include venue, bar/revision and feature
+version; deterministic event IDs make repeated windows idempotent. Warm-up
+restores from trailing durable history rather than serving a cold engine as
+ready. Reference-venue absence degrades consensus quality without fabricating
+agreement or blending venues into a synthetic bar.
+
+[Configuration](docs/CONFIGURATION.md) selects module/timeframe/runtime behavior;
+the producer's universe and frozen feature contracts remain authoritative.
+[Architecture](docs/ARCHITECTURE.md) defines module-fatal versus transient
+failures, coordinated shutdown and all-module readiness/watchdog behavior.
+[Temporal rules](../altspotter/docs/vps1/TEMPORAL_MODEL.md) and
+[cross-venue semantics](docs/CROSS_VENUE.md) qualify downstream availability.
+AltML/Strategy consume analytics; AltTech cannot place a trade or alter their
+model/setup decisions. [Operations](docs/OPERATIONS.md) owns diagnostic guidance.
+
 ## Documentation
 
 Start with the [documentation index](docs/README.md). Consumer-facing database,
@@ -41,7 +61,7 @@ NATS and protobuf guidance is in [connect.md](connect.md).
 src/
   app/                process entry point
   application/        lifecycle and module supervision
-  modules/            feature, microstructure, structure, regime, cross_venue,
+  modules/            feature, microstructure, structure, regime, cross_venue, macro,
                       venue_lite (the per-venue sweeps)
   config/             configuration model and validation
   messaging/          NATS adapter and protobuf codec

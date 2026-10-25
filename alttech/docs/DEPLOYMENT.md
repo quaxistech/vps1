@@ -187,7 +187,7 @@ schemas and runs; the unit fails because the tool has no migration path, and
 `--recreate` would drop every AltTech table. Bringing the schema to the
 deployed file is an open task.
 
-The service reports ready to systemd only after all five modules have validated
+The service reports ready to systemd only after all six modules have validated
 their schemas and bound their subscriptions, so `systemctl start` returning
 success means the service can actually produce output.
 

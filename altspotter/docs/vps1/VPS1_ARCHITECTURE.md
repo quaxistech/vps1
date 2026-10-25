@@ -41,3 +41,11 @@ AltSpotter owns the normalized market-data contract. Downstream services consume
 - Event time and revision metadata are preserved across derived records.
 
 See [Inter-service contracts](CONTRACTS.md), [Database ownership](DATABASE_ARCHITECTURE.md), and [Temporal model](TEMPORAL_MODEL.md).
+
+## External context branch
+
+AltMacro owns external market/reference/release vintages. AltTech's sixth,
+macro module reads these through `altmacro_ref` and publishes measured global
+context. Feature recipes determine which models consume it; publication alone
+does not establish model usage. The main diagram is the crypto path, not a claim
+that AltMacro or every service lies in one linear runtime cascade.

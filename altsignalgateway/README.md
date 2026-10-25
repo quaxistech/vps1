@@ -23,6 +23,32 @@ or execute orders.
 
 See [docs/DELIVERY.md](docs/DELIVERY.md) for the delivery contract.
 
+## Wire contract, ownership and recovery
+
+The current boundary is protocol **2**, payload schema **3** (`vps1-signal-1`):
+forecast block tag 11 and setup block tag 12 accompany the original proposal.
+[Protobuf](proto/gateway.proto) defines exact fields; older journalled schema
+rows retain their own version and presence semantics. Protocol 1 support is
+compatibility, not the VPS2 ingest contract.
+
+The `altsignalgateway` schema owns immutable canonical/source bytes and hashes,
+sequence allocation, delivery/session history and per-client contiguous cursors.
+Ingest ACKs JetStream only after journal commit. Delivery frames splice those
+stored bytes verbatim; consumers hash the original payload-field bytes before
+parsing, never a re-serialization. ACK means durable receipt, not a trade.
+
+Restart resumes the durable journal/cursors with bounded in-memory credit.
+Expired signals are no longer owed; skipped sequence ranges are explicit in
+resume metadata. A `client_id` owns one cursor: production, staging and observer
+identities must be separate. A superseded executor cannot safely reconnect in
+an eviction loop. Read-only queries require their own capability/session and
+never move a delivery cursor. The Gateway reads upstream T0 enrichment without
+altering setup prices, recommendation or provenance; absent context stays absent.
+
+See [configuration](docs/CONFIGURATION.md), [architecture](docs/ARCHITECTURE.md)
+and [consumer guide](docs/CONSUMER_GUIDE.md). The repository diagnostic client's
+serialization limitation is recorded in [source limitations](../docs/source-contract-limitations.md).
+
 ## Commands
 
 ```text

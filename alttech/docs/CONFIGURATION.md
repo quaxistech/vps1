@@ -149,3 +149,12 @@ bounds should be set from that.
 - **Which venue is primary** — validated as `bitget`. The analytics are built
   around one trading venue and three references; making that a free choice would
   imply a symmetry the design does not have.
+
+## Macro module
+
+The top-level `macro` section configures the sixth supervised module.
+`history_start` is required and must match AltMacro's usable coverage start;
+`cycle_interval_sec` defaults to 60 and `live_lookback_minutes` to 240. Source
+series come through read-only `altmacro_ref`; per-value availability/validity
+remains explicit. Recomputing trailing minutes is not authority to backdate
+new observations into an already stored downstream T0 snapshot.

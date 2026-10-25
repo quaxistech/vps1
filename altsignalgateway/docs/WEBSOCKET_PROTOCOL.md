@@ -39,7 +39,7 @@ codecs with the server, so the two cannot drift apart.
 | C→S | `Ack` | confirm protocol-level receipt of one message |
 | S→C | `ResumeComplete` | the backlog is drained |
 | S→C | `Ready` | the live stream begins |
-| S→C | `Heartbeat` / C→S | `HeartbeatAck` | liveness, with a nonce |
+| S→C / C→S | `Heartbeat` / `HeartbeatAck` | liveness, with a nonce |
 | either | `Goodbye` | orderly close |
 
 ## Lifecycle

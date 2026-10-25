@@ -97,6 +97,25 @@ published as warnings, never hard-rejected.
   `archive.snapshot.created.v1`. Drift, lifecycle, calibration, plan variants
   and counterfactuals are **persisted, not published** — see `docs/NATS.md`.
 
+## Publication authority and temporal recovery
+
+A technically valid proposal is market information, not financial admission.
+`recommended_for_execution` remains false; lifecycle names, economic diagnostics
+and adaptive ranking cannot override VPS2 Risk. Native downstream entry filters
+do not rewrite the original VPS1 setup, horizon, expiry or payload.
+
+The owned `altstrategy` schema archives immutable context revisions, candidates,
+rankings, plans/proposals, market outcomes and training provenance. A context
+that cannot be archived cannot decide. Proposal/outbox commit precedes publishing;
+restarts resume durable maintenance and publication progress. Market outcomes
+mature independently of external execution feedback, with AMBIGUOUS and
+DATA_INCOMPLETE retained explicitly.
+
+[Configuration](docs/CONFIGURATION.md), [point-in-time rules](docs/POINT_IN_TIME_CORRECTNESS.md)
+and [lifecycle](docs/STRATEGY_LIFECYCLE.md) define current selection and failure
+semantics. Runtime strategy states are not inferred from compiled seeds or
+historical registry snapshots. No production access occurred for this audit.
+
 ## Build
 
 ```sh

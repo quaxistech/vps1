@@ -25,6 +25,22 @@ The default policy forwards valid signals. `REJECT_ALL` is available for a
 deliberate freeze. The service never infers an execution recommendation from a
 quality score.
 
+## Temporal integrity and recovery
+
+Evaluation stores the exact point-in-time feature basis before publication.
+As-of priors use only matured outcomes available by the signal cutoff; live
+training reuses the evaluation vector and backfill uses Strategy's immutable
+archive. A model artifact must match its checksum and feature schema. Missing
+models produce an absent diagnostic score, not fabricated confidence or a
+publication veto. [Cold-start policy](docs/COLD_START.md) explains why the
+historic `policy.cold_start` name applies in every model state.
+
+Pending accepted rows can be republished after restart with deterministic
+message identity. Dataset watermarks and retention policies belong to the
+`altsignalquality` schema; no worker may mutate Strategy's proposals or context.
+[Architecture](docs/ARCHITECTURE.md), [leakage rules](docs/LEAKAGE.md) and
+[operations](docs/OPERATIONS.md) define storage, dependency and recovery behavior.
+
 ## Commands
 
 ```sh

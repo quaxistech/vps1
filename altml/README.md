@@ -21,17 +21,22 @@ AltML **never** publishes a trade signal, sends an order, or sets a
 stop-loss/take-profit. Everything downstream of a forecast belongs to other
 services.
 
-**What is deployed (registry, read-only, 2026-10-15).** `training.mode: econ`:
-one multiclass LightGBM per horizon, 15m, 1h and 4h (the retired `legacy`
-mode trained the 15-minute direction binary). Each answers "does a long, or a
-short, opened at T0 and closed at T0 + h clear the all-in cost?" (LONG / SHORT
-/ NEUTRAL, [econ_logic.hpp](src/altml/components/econ_logic.hpp)), with
-regression magnitudes for the excursions; predictions are `PredictionV1`
-schema 4. All three ACTIVE models read `recipe-1`: 132 features, a 44-member
-base projection plus Bitget's `talib-core:1` vectors on the aligned 15m and 1h
-grids (`aligned_sources` in `altml.model_feature_compatibility`).
-None reads AltTech's macro or cross-venue vectors, although both are
-published, and none is marked `probability_calibrated`.
+## Forecast contracts and ownership
+
+The implemented `econ` mode publishes horizon-specific LONG/SHORT/NEUTRAL
+market forecasts with excursion magnitudes and explicit cost/calibration
+metadata (`PredictionV1`, schema 4). The retained `legacy` mode interprets older
+binary direction models. Features and aligned sources are pinned by the
+registered recipe; optional upstream macro/cross-venue publication does not
+prove a model consumes it. No forecast is downstream trading approval.
+
+AltML owns its feature archive, labels/datasets, artifacts, model registry and
+lifecycle events in the `altml` schema. It reads upstream data through read-only
+foreign tables and live versioned events. [Feature contract](docs/FEATURE_CONTRACT.md)
+and [configuration](docs/CONFIGURATION.md) define compatibility and mode selection.
+[Recorded registry evidence](docs/archive/registry-2026-10-15.md) retains the
+original observed model/recipe identities. Runtime/model availability is
+**NOT VERIFIED DURING DOCUMENTATION-ONLY AUDIT**.
 
 ```text
 altml run             the service: label-builder + trainer + model-registry +

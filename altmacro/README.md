@@ -56,6 +56,21 @@ The database password is supplied through `ALTMACRO_DB_PASSWORD`. Provider
 credentials, when required by an enabled adapter, are read from their named
 environment variables. Secrets do not belong in YAML.
 
+## Ownership, publication and recovery
+
+AltMacro owns its registry bindings, normalized bars/reference values, economic
+release vintages, quality, coverage and resumable ingest cursors. Its producer
+schema and protobuf/NATS definitions qualify downstream data; it cannot write
+AltSpotter history or decide a Strategy proposal. AltMacro is a contextual
+input, not an obligatory stage through which every crypto candle flows.
+
+A revision preserves its original observation/availability semantics; economic
+vintages coexist. Consumers select data known by their cutoff, not merely the
+period a release describes. A same-basis provider fallback is explicit and
+cannot manufacture earlier coverage. Supervised polling and bounded publishing
+recover from provider/storage interruption using durable cursor state; absence,
+market closure, partial data and provider error remain distinct.
+
 ## Build and deployment
 
 The build presets and packaging scripts are in `CMakePresets.json` and

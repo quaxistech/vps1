@@ -66,7 +66,9 @@ deadlines in the payload.
 ## Signal integrity
 
 The client receives a canonical payload and its SHA-256 hash. Recompute the
-hash over the specified canonical bytes before processing the signal. The
+hash over the original payload-field wire bytes before processing the signal.
+Do not parse and re-serialize for verification: unknown protobuf fields can
+change byte order while preserving decoded meaning. The
 payload also carries the original upstream envelope for lineage verification.
 Journalled payloads are immutable; a corrected proposal arrives under a new
 signal identity.
@@ -85,5 +87,6 @@ altsignalgateway client --help
 ```
 
 The reference client supports receipt, resume, acknowledgement and protocol-2
-queries. It verifies hashes and is useful for validating a consumer
-implementation against the service contract.
+queries. Its current parsed-protobuf re-serialization hash check has the
+[forward-compatibility limitation](../../docs/source-contract-limitations.md);
+it is not the byte-exact verification reference for a consumer build.

@@ -12,7 +12,7 @@ those belong to services downstream of this forecast.
 ```
 AltSpotter (4-venue market data; AltML reads only its Bitget 1m candles)
     → AltTech (Bitget analytics; AltML reads only its Bitget "talib-core" feature vector)
-    → AltML   direction probability (P_UP / P_DOWN)
+    → AltML   horizon forecasts (econ LONG / SHORT / NEUTRAL; legacy P_UP / P_DOWN)
     → downstream strategy/execution services
 ```
 
@@ -50,8 +50,8 @@ labeled history the database holds (`training.min_rows` gate; until then the
 service serves safely in `DETERMINISTIC_ONLY` mode). Afterwards it re-trains on
 a rolling `training.lookback_days` window at the configured cadence:
 timestamp-grouped expanding walk-forward with a purged embargo, early stopping
-on an embargoed validation slice, hard economic gates (after-cost expectancy,
-profit factor, drawdown, minimum trades), a champion-challenger comparison on
+on an embargoed validation slice, market-quality gates (proper scoring, base-rate skill and fold consistency),
+economic diagnostics, a champion-challenger comparison on
 the same held-out recent slice, and a write/read parity self-check before the
 transactional ACTIVE flip (see [PROMOTION_GATES.md](PROMOTION_GATES.md)).
 Training is resource-bounded (threads, memory estimate, wall-clock budget,
