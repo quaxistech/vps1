@@ -193,9 +193,15 @@ AuthFailure verify_auth(const ClientRegistry& registry, const AuthRequest& req, 
     if (!constant_time_equal(req.echoed_nonce, req.server_nonce)) {
         return AuthFailure::nonce_mismatch;
     }
-    const int64_t skew = req.timestamp_ms > now_ms ? req.timestamp_ms - now_ms
-                                                   : now_ms - req.timestamp_ms;
-    if (skew > max_skew_ms) return AuthFailure::timestamp_skew;
+    // Wire timestamps are signed. Validate their UTC domain before subtracting;
+    // even INT64_MIN must produce an ordinary refusal, not signed overflow.
+    if (req.timestamp_ms <= 0 || now_ms <= 0 || max_skew_ms < 0) {
+        return AuthFailure::timestamp_skew;
+    }
+    const auto timestamp = static_cast<uint64_t>(req.timestamp_ms);
+    const auto now = static_cast<uint64_t>(now_ms);
+    const auto skew = timestamp > now ? timestamp - now : now - timestamp;
+    if (skew > static_cast<uint64_t>(max_skew_ms)) return AuthFailure::timestamp_skew;
 
     const std::string expected = hmac_sha256(
         client->secret,
