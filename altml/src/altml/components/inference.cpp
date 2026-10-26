@@ -11,6 +11,7 @@
 #include "altml/components/trainer_logic.hpp"
 #include "altml/core/codec.hpp"
 #include "altml/core/hash.hpp"
+#include "altml/core/verified_artifact.hpp"
 #include "altml/core/logger.hpp"
 #include "altml/core/pg.hpp"
 #include "altml/core/readiness.hpp"
@@ -117,14 +118,6 @@ struct EconModel {
 // "name:version" -- the identity of a feature set, used to key its layout.
 std::string source_set_key(const training::AlignedSource& src) {
     return src.feature_set + ":" + std::to_string(src.feature_set_version);
-}
-
-std::string file_sha256(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in.good()) return {};
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    return sha256_hex(ss.str());
 }
 
 bool is_within(const std::filesystem::path& root, const std::filesystem::path& child) {
@@ -440,7 +433,8 @@ public:
             return refuse("model_path_outside_root");
         }
         const std::string safe_path = canonical_artifact.string();
-        if (file_sha256(safe_path) != checksum) return refuse("checksum_mismatch");
+        auto model_bytes = verified_model_bytes(safe_path, checksum);
+        if (!model_bytes) return refuse("checksum_mismatch");
 
         auto m = std::make_unique<EconModel>();
         m->model_id = model_id;
@@ -519,7 +513,7 @@ public:
         if (sha256_hex(recipe::joined_names(names)) != names_sha) return refuse("feature_names_mismatch");
 
         int iterations = 0;
-        if (LGBM_BoosterCreateFromModelfile(safe_path.c_str(), &iterations, &m->booster) != 0) {
+        if (LGBM_BoosterLoadModelFromString(model_bytes->c_str(), &iterations, &m->booster) != 0) {
             return refuse("model_load_failed");
         }
         int nf = 0, nc = 0;
@@ -545,9 +539,10 @@ public:
                 std::error_code ae;
                 const auto canon = std::filesystem::canonical(apath, ae);
                 if (ae || !is_within(canonical_root, canon)) return refuse("magnitude_path_outside_root");
-                if (file_sha256(canon.string()) != asum) return refuse("magnitude_checksum_mismatch");
+                auto magnitude_bytes = verified_model_bytes(canon.string(), asum);
+                if (!magnitude_bytes) return refuse("magnitude_checksum_mismatch");
                 int it = 0;
-                if (LGBM_BoosterCreateFromModelfile(canon.string().c_str(), &it, handle) != 0) {
+                if (LGBM_BoosterLoadModelFromString(magnitude_bytes->c_str(), &it, handle) != 0) {
                     return refuse("magnitude_model_load_failed");
                 }
                 int mf = 0, mc = 0;

@@ -37,3 +37,10 @@ pruned by the storage-guard component beyond
 `storage.retired_model_keep_count`, keeping the currently `ACTIVE` model and a
 bounded number of recent predecessors for rollback/audit. See
 [STORAGE_BUDGET.md](STORAGE_BUDGET.md).
+
+The loader reads each text artifact once into an owned buffer, verifies that
+buffer, then loads it through LightGBM's string API. It never reopens the path
+after verification. Empty, embedded-NUL, incomplete or larger-than-128-MiB text
+artifacts are refused. Classifier and magnitude models retain the same root,
+checksum, recipe, feature-name/width and shape checks. No model is retrained by
+this integrity change.

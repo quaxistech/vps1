@@ -1,5 +1,10 @@
 include(Catch)
 
+add_executable(altml_artifact_tests unit/test_verified_artifact.cpp ../src/altml/core/hash.cpp)
+target_include_directories(altml_artifact_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(altml_artifact_tests PRIVATE Catch2::Catch2WithMain OpenSSL::Crypto)
+catch_discover_tests(altml_artifact_tests PROPERTIES LABELS unit)
+
 add_executable(altml_unit_tests
     unit/test_config_defaults.cpp
     unit/test_econ_logic.cpp
@@ -36,6 +41,11 @@ target_include_directories(altml_archive_tests PRIVATE "${CMAKE_SOURCE_DIR}/src"
 target_compile_definitions(altml_archive_tests PRIVATE ALTML_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(altml_archive_tests PRIVATE altml_core altml_proto_alttech Catch2::Catch2WithMain)
 catch_discover_tests(altml_archive_tests PROPERTIES LABELS integration)
+
+add_executable(altml_model_buffer_tests unit/test_model_buffer.cpp)
+target_include_directories(altml_model_buffer_tests PRIVATE "${CMAKE_SOURCE_DIR}/src" "${lightgbm_SOURCE_DIR}/include")
+target_link_libraries(altml_model_buffer_tests PRIVATE altml_core _lightgbm OpenMP::OpenMP_CXX Catch2::Catch2WithMain)
+catch_discover_tests(altml_model_buffer_tests PROPERTIES LABELS unit)
 
 # Exercise the same inference translation unit and ACK/NAK loop as the daemon.
 # The compiler cache can reuse its object; no production-only test hooks.
