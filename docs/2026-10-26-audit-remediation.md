@@ -61,31 +61,31 @@ and full suites remain in progress. FIXED_LOCAL does not imply tested or deploya
 
 | ID | Service-qualified audit ID | Correction | Status |
 |---|---|---|---|
-| 01 | ALTMACRO-AUDIT-001 | TLS hostname verification | FIXED_LOCAL |
+| 01 | ALTMACRO-AUDIT-001 | TLS hostname verification | TESTED_LOCAL |
 | 02 | ALTSIGNALQUALITY-AUDIT-001 | Immutable publication replay | FIXED_LOCAL |
 | 03 | ALTTECH-AUDIT-001 | Macro availability on method change | FIXED_LOCAL |
 | 04 | ALTML-AUDIT-001 | Archive original features before ACK | FIXED_LOCAL |
 | 05 | ALTSPOTTER-AUDIT-001 | Effective candle UPSERT corrections | FIXED_LOCAL |
-| 06 | ALTMACRO-AUDIT-003 | Correction-aware message identity | FIXED_LOCAL |
+| 06 | ALTMACRO-AUDIT-003 | Correction-aware message identity | TESTED_LOCAL |
 | 07 | ALTSTRATEGY-AUDIT-001 | Holding-window validation | FIXED_LOCAL |
-| 08 | ALTSIGNALGATEWAY-AUDIT-002 | Safe authentication skew arithmetic | FIXED_LOCAL |
-| 09 | ALTMACRO-AUDIT-002 | Bounded HTTP phases | FIXED_LOCAL |
+| 08 | ALTSIGNALGATEWAY-AUDIT-002 | Safe authentication skew arithmetic | TESTED_LOCAL |
+| 09 | ALTMACRO-AUDIT-002 | Bounded HTTP phases | TESTED_LOCAL |
 | 10 | ALTML-AUDIT-002 | Load verified model bytes | FIXED_LOCAL |
 | 11 | ALTSIGNALQUALITY-AUDIT-002 | Load verified model bytes | FIXED_LOCAL |
 | 12 | ALTSTRATEGY-AUDIT-002 | Canonical diagnostic outcomes | FIXED_LOCAL |
-| 13 | ALTSIGNALGATEWAY-AUDIT-001 | Hash exact received payload bytes | FIXED_LOCAL |
+| 13 | ALTSIGNALGATEWAY-AUDIT-001 | Hash exact received payload bytes | TESTED_LOCAL |
 | 14 | ALTTECH-AUDIT-002 | Six-module readiness inventory | FIXED_LOCAL |
 
 ## Validation and releases
 
-Work in progress; no source release is yet tested, packaged or activated.
+Work in progress. Gateway and Macro are tested locally. No candidate has been packaged or activated.
 
 - Gateway's first `RelWithDebInfo` build (-O2 -g, one job) was interrupted with
   SIGTERM/exit 143 because paging during session.cpp compilation was excessive.
   No test had run. The second build retains -O2, disables debug symbols and
   module scanning (the service has no C++ modules), and uses GCC
   `--param=ggc-min-expand=5 --param=ggc-min-heapsize=16384`. Same systemd resource
-  limits; still one compiler. The build remains in progress.
+  limits; still one compiler. The second build completed; Gateway passed all 123 CTests twice (the second run followed a diagnostic-only log improvement). Focused ASan/UBSan passed 19 cases / 174 assertions.
 - Tech `tests/macro_availability_sql.py` PASS: actual writer SQL, native
   PostgreSQL 16.15, method-only/value changes, same-method correction, restart
   and cutoff filtering. Full C++ suite remains pending. Old method snapshots
@@ -105,8 +105,8 @@ Work in progress; no source release is yet tested, packaged or activated.
   current unit permits execution. Connect/TLS share a connect deadline,
   write/read share a request deadline, teardown is bounded at one second,
   shutdown cancellation is polled at 50 ms, GET retry is capped at two attempts.
-  Controlled loopback TLS/stall/NSS-worker tests are added but not yet run.
-- Quality requires additive migration 0002 (original evaluation protobuf and
+  Controlled loopback TLS/stall/NSS-worker tests passed in release and under ASan/UBSan. All 74 Macro CTests passed; isolated JetStream tests proved correction IDs, retry deduplication and restart/outage behavior.
+- Quality requires additive migration 0002 (frozen final publication bytes and
   original input digest). First-claim evidence, not current model/context,
   drives both replay paths. Conflicting or unverifiable legacy duplicates are
   refused; legacy pending rows without original evaluation evidence cannot be
@@ -120,9 +120,44 @@ Work in progress; no source release is yet tested, packaged or activated.
   overhead within existing partition retention; capacity must be checked before
   activation. Its new bounded owner-only migration runner avoids schema rebuilds.
 - GitHub automation read: zero Actions workflows and zero repository webhooks.
-  No pushes or production rollout have occurred.
+  The branch has been pushed through the tested Gateway fixes; no production rollout has occurred.
 
 Pending: finish all seven local builds/suites, native archival/publication and
 broker tests, focused sanitizers, contract checks, focused source commits,
 immutable packages/ABI evidence and staging. Recheck production safety before
 activation; LIVE/HALTED and the existing Tech schema failure must not be bypassed.
+
+## Checkpoint at 19:30 UTC
+
+Tested/pushed source commits: `5e82e69bb9aa6bf4ee52781750a0fa6d2f6f5384`
+(authentication), `ccf61219769ce7772c625614f7d8b9e0e4d9c2e2` (wire verification).
+Tested Macro commits: `7065a51` (TLS/deadlines), `bee278c` (revision identity and
+pinned-header consistency); push still pending. Baseline checkpoint: `94645d0`.
+
+Macro's first configure lacked liblzma development metadata. Matching Ubuntu
+headers were extracted privately; the existing runtime was used, without a
+system package install. During path correction two local build invocations
+briefly overlapped; both were stopped (exit 143), then one build was restarted.
+A nonblocking flock now rejects overlapping heavy commands. Builds/tests and
+the disposable PostgreSQL fixture now share a transient user resource slice
+with the requested aggregate limits. No production service was affected.
+
+The first Macro suite had 73/74 passing: the JetStream fixture buffered its
+READY marker. Switching the fixture to raw pipe reads fixed it; targeted rerun
+and then all 74 tests passed. No failed test is being counted as a pass.
+
+Macro provisioning had included the system NATS 3.7.0 SDK while linking pinned
+3.8.2. It now includes the pinned header; no library version or stream setting
+changed. Known `/var/lib/altml/models/*/*.txt` artifacts: 33, maximum 1,026,161
+bytes, below the new 128 MiB bound. No artifact contents were inspected remotely.
+
+Quality forward migrations passed local application and idempotence. Its 0001
+checksum still equals production (`50414498e285a5ebe0231dc1120b09370f7d1320cf735063da4b10ff88593a56`).
+An initial attempt against an uninitialized test schema correctly failed; the
+existing owner schema was then prepared and the tests rerun. The migration runner
+never changes roles, grants or retention and refuses checksum drift.
+
+Current heavy job: Strategy local configure/build, one job, no tests yet.
+Remaining: Strategy/Spotter/Tech/ML/Quality full builds/suites, native archival
+and publication tests, immutable packaging/ABI/staging, remaining focused commits
+and push. All production activation remains gated by fresh LIVE/NORMAL evidence.
