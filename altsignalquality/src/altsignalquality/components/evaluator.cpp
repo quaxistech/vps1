@@ -1,6 +1,7 @@
 #include "altsignalquality/components/evaluator.hpp"
 
 #include "altsignalquality/components/model_runtime.hpp"
+#include "altsignalquality/components/publication_evidence.hpp"
 #include "altsignalquality/core/codec.hpp"
 #include "altsignalquality/core/logger.hpp"
 #include "altsignalquality/core/nats_subjects.hpp"
@@ -297,11 +298,10 @@ void EvaluatorComponent::run() {
     // JetStream de-duplicates on Nats-Msg-Id, and both ids are deterministic in
     // the signal id, so a re-publish after a crash is a no-op rather than a
     // second final signal.
-    const auto publish_final = [&](const as::TradeSignalProposal& proposal,
+    const auto build_final = [&](const as::TradeSignalProposal& proposal,
                                    const sq::SignalQualityEvaluation& eval,
                                    const std::string& final_signal_id,
-                                   const std::string& symbol_token,
-                                   const std::string& trace_id) -> Result<void> {
+                                   const std::string& trace_id) -> std::string {
         messaging::EnvelopeMeta meta;
         meta.message_id = final_signal_id;
         meta.event_type = "final_trade_signal";
@@ -316,8 +316,18 @@ void EvaluatorComponent::run() {
         *fin->mutable_quality() = eval;
         fin->set_published_at_ms(timeutil::now_ms());
         fin->set_producer_version(ALTSIGNALQUALITY_VERSION);
-        return nats_.js_publish(nats_subjects::final_signal(wiring, symbol_token),
-                                messaging::serialize(env), final_signal_id);
+        return messaging::serialize(env);
+    };
+
+    const auto publish_stored = [&](const data::ExistingEvaluation& row) -> Result<void> {
+        auto evidence = restore_publication(row);
+        if (!evidence) return std::unexpected(evidence.error());
+        const auto& e = *evidence;
+        const auto token = nats_subjects::subject_token(e.symbol, e.proposal.canonical_pair_id());
+        if (auto r = nats_.js_publish(nats_subjects::final_signal(wiring, token),
+                                      row.publication_payload, row.final_signal_id); !r)
+            return r;
+        return store.mark_published(e.proposal.signal_proposal_id(), timeutil::now_ms());
     };
 
     const auto publish_evaluation = [&](const sq::SignalQualityEvaluation& eval,
@@ -350,56 +360,9 @@ void EvaluatorComponent::run() {
     // new work, so a restart cannot swallow a signal.
     if (auto pending = store.load_unpublished(500); pending) {
         for (const auto& row : *pending) {
-            if (row.candidate_payload.empty()) {
-                // Without the original bytes the only honest options are to
-                // publish an approximation of someone else's trade or to stop.
-                // It stops, loudly.
-                log::error("unpublished_signal_unrecoverable",
-                           {{"signal_proposal_id", row.signal_proposal_id},
-                            {"reason", "the original candidate payload is gone"}});
-                continue;
-            }
-            auto proposal = messaging::parse_candidate(row.candidate_payload, nullptr, nullptr);
-            if (!proposal) {
-                log::error("unpublished_signal_unrecoverable",
-                           {{"signal_proposal_id", row.signal_proposal_id},
-                            {"reason", proposal.error().message}});
-                continue;
-            }
-            log::warn("republishing_unpublished_final_signal",
-                      {{"signal_proposal_id", row.signal_proposal_id},
-                       {"final_signal_id", row.final_signal_id}});
-
-            // The evaluation is rebuilt from the persisted decision, not
-            // re-derived: re-scoring here would publish a verdict the durable
-            // record never contained.
-            //
-            // An unrecognised basis is corruption, not a detail to smooth over.
-            // Defaulting it to MODEL would publish "a model accepted this" for a
-            // decision that may have been a cold-start pass-through — a claim
-            // the durable record never made, on a signal about to be executed.
-            const auto basis = domain::parse_decision_basis(row.decision_basis);
-            if (!basis) {
-                log::error("unpublished_signal_unrecoverable",
-                           {{"signal_proposal_id", row.signal_proposal_id},
-                            {"decision_basis", row.decision_basis},
-                            {"reason", "the persisted decision basis is not a known value"}});
-                continue;
-            }
-            auto eval = to_wire_evaluation(row, *proposal, *basis, 0);
-            const std::string token =
-                nats_subjects::subject_token(row.symbol, row.canonical_pair_id);
-            if (auto r = publish_final(*proposal, eval, row.final_signal_id, token, {}); r) {
-                if (auto marked = store.mark_published(row.signal_proposal_id, timeutil::now_ms());
-                    !marked) {
-                    log::error("republish_mark_failed",
-                               {{"signal_proposal_id", row.signal_proposal_id},
-                                {"message", marked.error().message}});
-                }
-            } else {
+            if (auto r = publish_stored(data::ExistingEvaluation(row)); !r)
                 log::error("republish_failed", {{"signal_proposal_id", row.signal_proposal_id},
                                                 {"message", r.error().message}});
-            }
         }
     } else {
         log::warn("unpublished_scan_failed", {{"message", pending.error().message}});
@@ -464,7 +427,22 @@ void EvaluatorComponent::run() {
             const int64_t age_ms = timeutil::now_ms() - candidate.created_at_ms;
             const bool stale = age_ms > cfg.max_signal_age_sec * 1000;
 
+            bool input_conflict = false;
             auto processed = [&]() -> Result<void> {
+                const auto replay_existing = [&](const data::ExistingEvaluation& prior) -> Result<void> {
+                    if (!redelivery_matches(prior, msg.data())) {
+                        input_conflict = true;
+                        return fail(ErrorCode::validation_error, "same-ID candidate conflicts or lacks original integrity evidence");
+                    }
+                    ++impl_->duplicates;
+                    if (prior.decision == "ACCEPTED" && !prior.published) return publish_stored(prior);
+                    return {};
+                };
+                // Look up the immutable claim before consulting mutable model,
+                // context, priors, age policy or feature state.
+                auto prior = store.find_evaluation(candidate.signal_proposal_id);
+                if (!prior) return std::unexpected(prior.error());
+                if (*prior) return replay_existing(**prior);
                 auto ctx = store.load_context_for_candidate(candidate.candidate_id);
                 if (!ctx) return std::unexpected(ctx.error());
 
@@ -559,55 +537,24 @@ void EvaluatorComponent::run() {
                     row.candidate_payload = std::string(msg.data());
                 }
 
+                row.candidate_sha256 = sha256_hex(msg.data());
+                const int32_t model_version = model ? model->meta().model_version : 0;
+                const auto eval = to_wire_evaluation(row, *parsed, decision.basis, model_version);
+                if (decision.accepted)
+                    row.publication_payload = build_final(*parsed, eval, row.final_signal_id, trace_id);
+
                 // The claim comes BEFORE any publish. This is the idempotency
                 // boundary for the whole service.
                 auto existing = store.claim_evaluation(row);
                 if (!existing) return std::unexpected(existing.error());
 
-                const int32_t model_version = model ? model->meta().model_version : 0;
-                if (existing->has_value()) {
-                    ++impl_->duplicates;
-                    const auto& prior = **existing;
-                    if (prior.decision == "ACCEPTED" && !prior.published) {
-                        auto eval = to_wire_evaluation(row, *parsed, decision.basis,
-                                                       model_version);
-                        eval.set_evaluation_id(prior.evaluation_id);
-                        eval.set_decision(sq::DECISION_ACCEPTED);
-                        if (auto r = publish_final(*parsed, eval, prior.final_signal_id, token,
-                                                   trace_id);
-                            !r) {
-                            return r;
-                        }
-                        if (auto r = store.mark_published(candidate.signal_proposal_id,
-                                                          timeutil::now_ms());
-                            !r) {
-                            return r;
-                        }
-                        log::info("duplicate_signal_republished",
-                                  {{"signal_proposal_id", candidate.signal_proposal_id}});
-                    } else {
-                        log::info("duplicate_signal_skipped",
-                                  {{"signal_proposal_id", candidate.signal_proposal_id},
-                                   {"first_decision", prior.decision},
-                                   {"first_evaluated_at_ms", prior.evaluated_at_ms}});
-                    }
-                    return {};
-                }
+                // A concurrent first claim wins with all its original evidence.
+                if (*existing) return replay_existing(**existing);
 
                 ++impl_->evaluated;
-                const auto eval = to_wire_evaluation(row, *parsed, decision.basis,
-                                                     model_version);
                 if (decision.accepted) {
                     ++impl_->accepted;
-                    if (auto r = publish_final(*parsed, eval, row.final_signal_id, token, trace_id);
-                        !r) {
-                        return r;
-                    }
-                    if (auto r = store.mark_published(candidate.signal_proposal_id,
-                                                      timeutil::now_ms());
-                        !r) {
-                        return r;
-                    }
+                    if (auto r = publish_stored(data::ExistingEvaluation(row)); !r) return r;
                 }
                 publish_evaluation(eval, token, trace_id);
                 log::info("signal_evaluated",
@@ -631,6 +578,9 @@ void EvaluatorComponent::run() {
 
             if (processed) {
                 (void)msg.ack();
+            } else if (input_conflict) {
+                log::error("candidate_identity_refused", {{"signal_proposal_id", candidate.signal_proposal_id}});
+                (void)msg.term();
             } else {
                 // The decision was not durably completed. Nak so JetStream
                 // redelivers; the claim row makes the retry idempotent.

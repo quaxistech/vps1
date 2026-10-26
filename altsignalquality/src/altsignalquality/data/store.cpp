@@ -18,6 +18,30 @@ namespace {
 
 using nlohmann::json;
 
+std::optional<ExistingEvaluation> read_existing(pqxx::transaction_base& txn,
+                                                 const std::string& proposal_id) {
+    const auto rows = txn.exec_params(
+        "SELECT evaluation_id, decision, COALESCE(final_signal_id,''), published, evaluated_at_ms,"
+        " COALESCE(candidate_payload,''::bytea)::text, COALESCE(publication_payload,''::bytea)::text,"
+        " COALESCE(candidate_sha256,'') FROM altsignalquality.signal_evaluations"
+        " WHERE signal_proposal_id = $1", proposal_id);
+    if (rows.empty()) return std::nullopt;
+    const auto& row = rows[0];
+    ExistingEvaluation e;
+    e.evaluation_id = row[0].as<std::string>();
+    e.decision = row[1].as<std::string>();
+    e.final_signal_id = row[2].as<std::string>();
+    e.published = row[3].as<bool>();
+    e.evaluated_at_ms = row[4].as<int64_t>();
+    const auto original = pgarray::parse_hex_bytea(row[5].as<std::string>());
+    e.candidate_payload.assign(original.begin(), original.end());
+    const auto evaluation = pgarray::parse_hex_bytea(row[6].as<std::string>());
+    e.publication_payload.assign(evaluation.begin(), evaluation.end());
+    e.candidate_sha256 = row[7].as<std::string>();
+    return e;
+}
+
+
 // Ids are sha256-derived from the natural key so the SAME signal always yields
 // the SAME id, on any host, after any restart, in any order.
 // nlohmann's non-throwing parse returns a DISCARDED value on bad input, and
@@ -347,10 +371,10 @@ Result<std::optional<ExistingEvaluation>> Store::claim_evaluation(const Evaluati
             " evaluated_at_ms, feature_schema_version, feature_schema_hash, features,"
             " validity_bitmap, missing_feature_count, has_quality_score, raw_score,"
             " quality_score, decision_threshold, decision, decision_basis, reason_codes,"
-            " model_id, calibration_version, inference_latency_us, final_signal_id, published, candidate_payload)"
+            " model_id, calibration_version, inference_latency_us, final_signal_id, published, candidate_payload, publication_payload, candidate_sha256)"
             " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,"
             "         $19::real[],$20::bytea,$21,$22,$23,$24,$25,$26,$27,$28::text[],$29,$30,"
-            "         $31,$32,false,$33::bytea)"
+            "         $31,$32,false,$33::bytea,$34::bytea,$35)"
             " ON CONFLICT (signal_proposal_id) DO NOTHING"
             " RETURNING evaluation_id",
             row.signal_proposal_id, row.evaluation_id, row.candidate_id, row.canonical_pair_id,
@@ -375,23 +399,24 @@ Result<std::optional<ExistingEvaluation>> Store::claim_evaluation(const Evaluati
                 ? std::optional<std::string>()
                 : std::optional(pgarray::bytea_hex_literal(
                       std::vector<uint8_t>(row.candidate_payload.begin(),
-                                           row.candidate_payload.end()))));
+                                           row.candidate_payload.end()))),
+            row.publication_payload.empty() ? std::optional<std::string>() :
+                std::optional(pgarray::bytea_hex_literal(std::vector<uint8_t>(
+                    row.publication_payload.begin(), row.publication_payload.end()))),
+            row.candidate_sha256.empty() ? std::optional<std::string>() :
+                std::optional(row.candidate_sha256));
         if (!inserted.empty()) return;  // fresh claim
 
-        const auto prior = txn.exec_params(
-            "SELECT evaluation_id, decision, COALESCE(final_signal_id,''), published,"
-            "       evaluated_at_ms"
-            " FROM altsignalquality.signal_evaluations WHERE signal_proposal_id = $1",
-            row.signal_proposal_id);
-        if (prior.empty()) return;
-        ExistingEvaluation e;
-        e.evaluation_id = prior[0][0].as<std::string>();
-        e.decision = prior[0][1].as<std::string>();
-        e.final_signal_id = prior[0][2].as<std::string>();
-        e.published = prior[0][3].as<bool>();
-        e.evaluated_at_ms = prior[0][4].as<int64_t>();
-        existing = e;
+        existing = read_existing(txn, row.signal_proposal_id);
+        if (!existing) throw std::runtime_error("conflicting evaluation claim disappeared");
     });
+    if (!res) return std::unexpected(res.error());
+    return existing;
+}
+
+Result<std::optional<ExistingEvaluation>> Store::find_evaluation(const std::string& proposal_id) {
+    std::optional<ExistingEvaluation> existing;
+    auto res = pool_.with_txn([&](pqxx::work& txn) { existing = read_existing(txn, proposal_id); });
     if (!res) return std::unexpected(res.error());
     return existing;
 }
@@ -423,7 +448,8 @@ Result<std::vector<EvaluationRow>> Store::load_unpublished(int limit) {
                  "       decision_basis, reason_codes::text, COALESCE(model_id,''),"
                  "       COALESCE(calibration_version,''), inference_latency_us,"
                  "       COALESCE(final_signal_id,''), missing_feature_count,"
-                 "       COALESCE(candidate_payload,''::bytea)::text"
+                 "       COALESCE(candidate_payload,''::bytea)::text,"
+                 "       COALESCE(publication_payload,''::bytea)::text, COALESCE(candidate_sha256,'')"
                  " FROM altsignalquality.signal_evaluations"
                  " WHERE decision = 'ACCEPTED' AND NOT published"
                  " ORDER BY signal_created_at_ms LIMIT $1",
@@ -465,6 +491,9 @@ Result<std::vector<EvaluationRow>> Store::load_unpublished(int limit) {
                 // unrecoverable signal, never published as a partial one.
                 e.candidate_payload.clear();
             }
+            const auto evidence = pgarray::parse_hex_bytea(r[29].as<std::string>());
+            e.publication_payload.assign(evidence.begin(), evidence.end());
+            e.candidate_sha256 = r[30].as<std::string>();
             out.push_back(std::move(e));
         }
     });

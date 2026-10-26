@@ -24,6 +24,7 @@ target_link_libraries(altsignalquality_domain_tests PRIVATE
 catch_discover_tests(altsignalquality_domain_tests PROPERTIES LABELS unit)
 
 add_executable(altsignalquality_io_tests
+    unit/test_publication_evidence.cpp
     unit/test_pg_codec.cpp
     unit/test_identifiers.cpp
     unit/test_wire_contract.cpp)
@@ -64,3 +65,8 @@ endforeach()
 add_executable(altsignalquality_integration_tests integration/test_live_path.cpp)
 target_link_libraries(altsignalquality_integration_tests PRIVATE
     altsignalquality_core altsignalquality_proto Catch2::Catch2WithMain)
+
+add_executable(altsignalquality_publication_store_tests unit/test_publication_store.cpp)
+target_compile_definitions(altsignalquality_publication_store_tests PRIVATE ALTSQ_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(altsignalquality_publication_store_tests PRIVATE altsignalquality_core Catch2::Catch2WithMain)
+catch_discover_tests(altsignalquality_publication_store_tests PROPERTIES LABELS integration)

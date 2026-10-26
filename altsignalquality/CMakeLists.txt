@@ -142,6 +142,7 @@ install(TARGETS altsignalquality RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(PROGRAMS
     scripts/provision.sh
     scripts/db-bootstrap.sh
+    scripts/apply-additive-migrations.sh
     scripts/install-systemd-units.sh
     DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY db/migrations/
