@@ -24,6 +24,7 @@ target_link_libraries(altsignalquality_domain_tests PRIVATE
 catch_discover_tests(altsignalquality_domain_tests PROPERTIES LABELS unit)
 
 add_executable(altsignalquality_io_tests
+    unit/test_verified_artifact.cpp
     unit/test_publication_evidence.cpp
     unit/test_pg_codec.cpp
     unit/test_identifiers.cpp
@@ -70,3 +71,9 @@ add_executable(altsignalquality_publication_store_tests unit/test_publication_st
 target_compile_definitions(altsignalquality_publication_store_tests PRIVATE ALTSQ_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(altsignalquality_publication_store_tests PRIVATE altsignalquality_core Catch2::Catch2WithMain)
 catch_discover_tests(altsignalquality_publication_store_tests PROPERTIES LABELS integration)
+
+add_executable(altsignalquality_model_buffer_tests unit/test_model_buffer.cpp
+    ../src/altsignalquality/components/model_runtime.cpp)
+target_include_directories(altsignalquality_model_buffer_tests PRIVATE "${lightgbm_SOURCE_DIR}/include")
+target_link_libraries(altsignalquality_model_buffer_tests PRIVATE altsignalquality_core _lightgbm OpenMP::OpenMP_CXX Catch2::Catch2WithMain)
+catch_discover_tests(altsignalquality_model_buffer_tests PROPERTIES LABELS unit)

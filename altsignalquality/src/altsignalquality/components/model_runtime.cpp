@@ -3,6 +3,7 @@
 #include <LightGBM/c_api.h>
 
 #include "altsignalquality/core/hash.hpp"
+#include "altsignalquality/core/verified_artifact.hpp"
 #include "altsignalquality/core/logger.hpp"
 #include "altsignalquality/core/time.hpp"
 
@@ -55,15 +56,8 @@ Result<std::unique_ptr<LoadedModel>> LoadedModel::open(const data::ActiveModel& 
     const std::string path = canonical_artifact.string();
 
     // 2. The bytes must be the bytes that were registered.
-    const std::string actual = file_sha256(path);
-    if (actual.empty()) {
-        return fail(ErrorCode::model_error, "model artifact is unreadable: " + path);
-    }
-    if (actual != row.artifact_checksum) {
-        return fail(ErrorCode::model_error,
-                    "model artifact checksum mismatch for " + row.model_id +
-                        " (registered " + row.artifact_checksum + ", on disk " + actual + ")");
-    }
+    const auto model_bytes = verified_model_bytes(path, row.artifact_checksum);
+    if (!model_bytes) return fail(ErrorCode::model_error, model_bytes.error().message);
 
     // 3. The contract the model was trained under must be the contract running
     //    now. A positional vector against the wrong list is silent nonsense.
@@ -80,7 +74,7 @@ Result<std::unique_ptr<LoadedModel>> LoadedModel::open(const data::ActiveModel& 
     model->meta_ = row;
     BoosterHandle booster = nullptr;
     int iterations = 0;
-    if (LGBM_BoosterCreateFromModelfile(path.c_str(), &iterations, &booster) != 0) {
+    if (LGBM_BoosterLoadModelFromString(model_bytes->c_str(), &iterations, &booster) != 0) {
         return fail(ErrorCode::model_error,
                     std::string("LightGBM could not load ") + path + ": " + LGBM_GetLastError());
     }
