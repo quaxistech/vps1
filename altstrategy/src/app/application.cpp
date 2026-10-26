@@ -9,6 +9,7 @@
 #include "altstrategy/engine_io/maintenance_scheduler.hpp"
 #include "altstrategy/engine_io/market_reader.hpp"
 #include "altstrategy/engine_io/outbox_publisher.hpp"
+#include "altstrategy/engine_io/plan_config.hpp"
 #include "altstrategy/engine_io/snapshot_exporter.hpp"
 #include "altstrategy/engine_io/wire_codec.hpp"
 #include "altstrategy/logging/logger.hpp"
@@ -245,18 +246,13 @@ bool Application::setup() {
     // one place it was configured. A config asserting something the system
     // forbids is a startup failure, not a value to quietly clamp.
     {
-        const int64_t configured_ms =
-            config::opt_int(plan_cfg, "max_holding_hours",
-                            engine::kMaxHoldingMs / 3600000) * 3600000;
-        if (configured_ms > engine::kMaxHoldingMs) {
-            log::error("config_rejected",
-                       {{"key", "trade_plan.max_holding_hours"},
-                        {"configured_hours", configured_ms / 3600000},
-                        {"ceiling_hours", engine::kMaxHoldingMs / 3600000},
-                        {"reason", "exceeds the absolute holding ceiling"}});
+        const auto holding = engine_io::parse_max_holding_ms(plan_cfg);
+        if (!holding) {
+            log::error("config_rejected", {{"key", "trade_plan.max_holding_hours"},
+                                           {"reason", holding.error().message}});
             return false;
         }
-        dcfg.plan.extended_max_ms = configured_ms;
+        dcfg.plan.extended_max_ms = *holding;
     }
     // QUALITY-05: which plan geometry learning may draw on. Read before the
     // engine exists, because the engine loads posteriors by it too.

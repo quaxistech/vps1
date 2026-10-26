@@ -11,6 +11,8 @@
 
 #include <optional>
 #include <set>
+#include <limits>
+#include <stdexcept>
 
 using namespace altstrategy::engine;
 using namespace altstrategy::engine::test;
@@ -244,12 +246,23 @@ TEST_CASE("the 48-hour ceiling cannot be raised by a PlanConfig") {
     const auto c = long_candidate(ctx);
     PlanConfig cfg;
     cfg.extended_max_ms = 200LL * 3600 * 1000;   // a caller asking for 200 hours
-    const auto plans = generate_plans(c, ctx, 2'000'000, cfg);
-    REQUIRE_FALSE(plans.empty());
-    for (const auto& v : plans) {
-        INFO("variant " << v.variant_id);
-        CHECK(v.max_holding_time_ms <= kMaxHoldingMs);
-        CHECK(v.time_stop_at_ms <= 2'000'000 + kMaxHoldingMs);
+    CHECK_THROWS_AS(generate_plans(c, ctx, 2'000'000, cfg), std::invalid_argument);
+}
+
+TEST_CASE("direct plan limits reject invalid ranges before proposal clamp") {
+    const auto ctx = make_ctx(100.0);
+    const auto c = long_candidate(ctx);
+    for (const auto limit : {int64_t{0}, int64_t{-1}, int64_t{299'999}, kMaxHoldingMs + 1,
+                             std::numeric_limits<int64_t>::max()}) {
+        PlanConfig cfg;
+        cfg.extended_max_ms = limit;
+        CHECK_THROWS_AS(generate_plans(c, ctx, 2'000'000, cfg), std::invalid_argument);
+    }
+    for (const auto limit : {int64_t{300'000}, int64_t{3'600'000}, kMaxHoldingMs}) {
+        PlanConfig cfg; cfg.extended_max_ms = limit;
+        const auto plans = generate_plans(c, ctx, 2'000'000, cfg);
+        REQUIRE_FALSE(plans.empty());
+        for (const auto& plan : plans) CHECK(plan.max_holding_time_ms <= limit);
     }
 }
 

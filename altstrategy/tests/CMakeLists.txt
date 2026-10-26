@@ -24,6 +24,7 @@ target_link_libraries(altstrategy_engine_tests PRIVATE altstrategy_engine Catch2
 catch_discover_tests(altstrategy_engine_tests)
 
 add_executable(altstrategy_io_tests
+    unit/test_plan_config.cpp
     unit/test_context_json.cpp
     unit/test_io_assembler_exporter.cpp
     unit/test_wire_contract.cpp)

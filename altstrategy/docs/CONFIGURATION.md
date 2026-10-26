@@ -41,3 +41,10 @@ files — strategy parameter sets are versioned in the database.
 config before start. The deploy runs the common-config check against the new
 release binary. `${ENV_VAR}` placeholders are expanded from the environment;
 a missing variable is an error (secrets stay explicit).
+
+`trade_plan.max_holding_hours` accepts an integer from 1 through 48; absence
+retains the default 48. Supplied malformed, negative, zero, oversized and
+out-of-int64 values are startup errors. Validation precedes hours-to-ms
+multiplication. Direct PlanConfig callers independently require holding caps
+between five minutes (the existing validity floor) and 48 hours. Valid holding
+classes, expiry formulas and geometry multipliers are unchanged.

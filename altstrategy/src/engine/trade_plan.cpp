@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace altstrategy::engine {
 
@@ -136,6 +137,10 @@ FillEstimate estimate_fill(EntryType type, double distance_bps, double spread_bp
 
 std::vector<TradePlanVariant> generate_plans(const StrategyCandidate& c, const DecisionContext& ctx,
                                              int64_t now_ms, const PlanConfig& cfg) {
+    for (const auto limit : {cfg.scalp_max_ms, cfg.intraday_max_ms, cfg.extended_max_ms}) {
+        if (limit < 5LL * 60 * 1000 || limit > kMaxHoldingMs)
+            throw std::invalid_argument("holding limit must be in [5 minutes,48 hours]");
+    }
     std::vector<TradePlanVariant> out;
     const double px = ctx.last_price() > 0 ? ctx.last_price() : c.entry_hint;
     const double atr = ctx.atr() > 0 ? ctx.atr() : px * 0.004;

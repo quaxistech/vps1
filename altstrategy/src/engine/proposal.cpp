@@ -59,6 +59,7 @@ std::vector<std::string> invalid_reasons(const TradePlanVariant& p, const Decisi
     if (std::abs(p.entry_price - p.stop_loss_price) <= 0) r.push_back("ZERO_STOP_DISTANCE");
     if (std::abs(p.take_profit_price - p.entry_price) <= 0) r.push_back("ZERO_TARGET_DISTANCE");
     // Holding limit.
+    if (p.max_holding_time_ms < 5LL * 60 * 1000) r.push_back("HOLDING_TIME_BELOW_MINIMUM");
     if (p.max_holding_time_ms > k48h) r.push_back("HOLDING_TIME_EXCEEDS_LIMIT");
     // Time ordering: created < time_stop; entry timeout positive; time_stop future.
     if (p.time_stop_at_ms <= now_ms) r.push_back("INVALID_TIME_ORDERING");
@@ -138,8 +139,9 @@ TradeSignalProposal build_proposal(const ProposalInputs& in, int64_t now_ms) {
 
     // Signal validity: the market idea stays actionable for a slice of the
     // horizon, always shorter than the max holding (§14).
-    const int64_t validity = std::clamp<int64_t>(c.expected_horizon_ms / 4, 5LL * 60 * 1000,
-                                                 std::min<int64_t>(p.max_holding_time_ms, 2LL * 3600 * 1000));
+    const int64_t validity = p.max_holding_time_ms < 5LL * 60 * 1000 ? 0 :
+        std::clamp<int64_t>(c.expected_horizon_ms / 4, 5LL * 60 * 1000,
+                           std::min<int64_t>(p.max_holding_time_ms, 2LL * 3600 * 1000));
     s.valid_until_ms = now_ms + validity;
 
     // Forward-looking economics come from AltML or they do not exist.
