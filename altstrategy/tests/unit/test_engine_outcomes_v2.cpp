@@ -12,6 +12,16 @@
 
 using namespace altstrategy::engine;
 
+TEST_CASE("diagnostic denominators include only realized canonical outcomes") {
+    CHECK(is_realized_outcome(MarketOutcomeType::target_first));
+    CHECK(is_realized_outcome(MarketOutcomeType::stop_first));
+    CHECK(is_realized_outcome(MarketOutcomeType::time_stop));
+    CHECK_FALSE(is_realized_outcome(MarketOutcomeType::ambiguous));
+    CHECK_FALSE(is_realized_outcome(MarketOutcomeType::entry_not_reached));
+    CHECK_FALSE(is_realized_outcome(MarketOutcomeType::entry_expired));
+    CHECK_FALSE(is_realized_outcome(MarketOutcomeType::data_incomplete));
+}
+
 namespace {
 
 constexpr int64_t kMin = 60'000;

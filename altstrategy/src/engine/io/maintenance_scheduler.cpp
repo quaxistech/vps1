@@ -458,7 +458,7 @@ int MaintenanceScheduler::calibrate_geometry(int64_t now_ms) {
     std::map<std::string, Cell> grid;   // "side|stop|target" -> stats
 
     for (const auto& rp : sample) {
-        auto path = reader_.read_path(rp.p.canonical_pair_id, rp.p.created_at_ms,
+        auto path = reader_.read_price_path(rp.p.canonical_pair_id, rp.p.created_at_ms,
                                       rp.p.time_stop_at_ms + 60'000);
         if (path.bars.size() < 2) continue;
         const double dir = rp.p.side == Side::long_ ? 1.0 : -1.0;
@@ -479,10 +479,9 @@ int MaintenanceScheduler::calibrate_geometry(int64_t now_ms) {
                 g.stop_loss_price = entry - dir * s_mult * rp.atr_used;
                 g.take_profit_price = entry + dir * t_mult * rp.atr_used;
 
-                const auto o = reconstruct_outcome(g, path.bars, path.source, rp.p.candidate_id,
+                const auto o = reconstruct_outcome_v2(g, path, rp.p.candidate_id,
                                                    rp.p.signal_proposal_id, now_ms);
-                if (o.outcome == MarketOutcomeType::entry_not_reached ||
-                    o.outcome == MarketOutcomeType::data_incomplete) {
+                if (!is_realized_outcome(o.outcome)) {
                     continue;
                 }
                 char key[64];
@@ -497,7 +496,8 @@ int MaintenanceScheduler::calibrate_geometry(int64_t now_ms) {
     }
     if (grid.empty()) return 0;
 
-    std::string json = "{\"grid\":[";
+    std::string json = "{\"evaluator_version\":" + std::to_string(kOutcomeEvaluatorVersion) +
+                       ",\"fill_model\":\"" + kOutcomeFillModel + "\",\"grid\":[";
     bool first = true;
     std::string best_key;
     double best_exp = -1e18;

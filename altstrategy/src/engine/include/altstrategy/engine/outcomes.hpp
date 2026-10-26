@@ -98,6 +98,12 @@ struct OutcomeGeometry {
 inline constexpr int kOutcomeEvaluatorVersion = 2;
 inline constexpr const char* kOutcomeFillModel = "conservative-1";
 
+// Only resolved returns belong in diagnostic expectation denominators.
+inline constexpr bool is_realized_outcome(MarketOutcomeType outcome) {
+    return outcome == MarketOutcomeType::target_first ||
+           outcome == MarketOutcomeType::stop_first || outcome == MarketOutcomeType::time_stop;
+}
+
 // A price path and what is known about its completeness.
 struct PricePath {
     std::vector<PathBar> bars;            // ascending open_ms
