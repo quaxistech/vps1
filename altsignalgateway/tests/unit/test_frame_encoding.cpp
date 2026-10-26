@@ -162,3 +162,51 @@ TEST_CASE("a large payload is framed with a correct multi-byte length") {
         CHECK(*round_trip == *stored);
     }
 }
+
+namespace {
+std::string wire_message(unsigned tag, std::string_view content) {
+    std::string result;
+    const auto put = [&](uint64_t value) {
+        do {
+            const auto byte = static_cast<unsigned char>(value & 127);
+            value >>= 7;
+            result.push_back(static_cast<char>(byte | (value ? 128 : 0)));
+        } while (value);
+    };
+    put((tag << 3) | 2); put(content.size()); result += content;
+    return result;
+}
+}
+
+TEST_CASE("consumer verifies opaque wire bytes in delivery and query responses") {
+    const auto known = *messaging::canonical_serialize(payload_fixture());
+    const auto unknown = wire_message(999, "future schema");
+    for (const auto& payload : {unknown + known, known + unknown}) {
+        auto env = envelope_fixture();
+        env.set_payload_sha256(sha256_hex(payload));
+        const auto envelope = *messaging::canonical_serialize(env);
+        // Reversed known field order is legal too.
+        const auto signal = wire_message(2, payload) + wire_message(1, envelope);
+        const auto delivered = wire_message(4, signal);
+        REQUIRE(messaging::verify_server_payloads(delivered));
+        CHECK(*messaging::verify_server_payloads(delivered) == 1);
+        for (unsigned result_tag : {2u, 4u}) {
+            const auto query = wire_message(10, wire_message(1, "request") +
+                                               wire_message(result_tag, wire_message(1, signal)));
+            REQUIRE(messaging::verify_server_payloads(query));
+            CHECK(*messaging::verify_server_payloads(query) == 1);
+        }
+        CHECK_FALSE(messaging::verify_server_payloads(
+            wire_message(4, signal + wire_message(2, payload))));
+        CHECK_FALSE(messaging::verify_server_payloads(delivered + delivered));
+        CHECK_FALSE(messaging::verify_server_payloads(wire_message(4,
+            wire_message(1, envelope) + wire_message(2, payload + "x"))));
+        CHECK_FALSE(messaging::verify_server_payloads(delivered.substr(0, delivered.size() - 1)));
+    }
+    // History pages contain summaries/envelopes, not SignalPayload bytes.
+    const auto history = wire_message(10, wire_message(3, wire_message(7, "")));
+    REQUIRE(messaging::verify_server_payloads(history));
+    CHECK(*messaging::verify_server_payloads(history) == 0);
+    CHECK_FALSE(messaging::verify_server_payloads(std::string(10, '\xff')));
+    CHECK_FALSE(messaging::verify_server_payloads(std::string(17 * 1024 * 1024, 'x')));
+}
