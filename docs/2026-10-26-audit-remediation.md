@@ -67,18 +67,18 @@ and full suites remain in progress. FIXED_LOCAL does not imply tested or deploya
 | 04 | ALTML-AUDIT-001 | Archive original features before ACK | FIXED_LOCAL |
 | 05 | ALTSPOTTER-AUDIT-001 | Effective candle UPSERT corrections | FIXED_LOCAL |
 | 06 | ALTMACRO-AUDIT-003 | Correction-aware message identity | TESTED_LOCAL |
-| 07 | ALTSTRATEGY-AUDIT-001 | Holding-window validation | FIXED_LOCAL |
+| 07 | ALTSTRATEGY-AUDIT-001 | Holding-window validation | TESTED_LOCAL |
 | 08 | ALTSIGNALGATEWAY-AUDIT-002 | Safe authentication skew arithmetic | TESTED_LOCAL |
 | 09 | ALTMACRO-AUDIT-002 | Bounded HTTP phases | TESTED_LOCAL |
 | 10 | ALTML-AUDIT-002 | Load verified model bytes | FIXED_LOCAL |
 | 11 | ALTSIGNALQUALITY-AUDIT-002 | Load verified model bytes | FIXED_LOCAL |
-| 12 | ALTSTRATEGY-AUDIT-002 | Canonical diagnostic outcomes | FIXED_LOCAL |
+| 12 | ALTSTRATEGY-AUDIT-002 | Canonical diagnostic outcomes | TESTED_LOCAL |
 | 13 | ALTSIGNALGATEWAY-AUDIT-001 | Hash exact received payload bytes | TESTED_LOCAL |
 | 14 | ALTTECH-AUDIT-002 | Six-module readiness inventory | FIXED_LOCAL |
 
 ## Validation and releases
 
-Work in progress. Gateway and Macro are tested locally. No candidate has been packaged or activated.
+Work in progress. Gateway, Macro and Strategy are tested locally. No candidate has been packaged or activated.
 
 - Gateway's first `RelWithDebInfo` build (-O2 -g, one job) was interrupted with
   SIGTERM/exit 143 because paging during session.cpp compilation was excessive.
@@ -157,7 +157,29 @@ An initial attempt against an uninitialized test schema correctly failed; the
 existing owner schema was then prepared and the tests rerun. The migration runner
 never changes roles, grants or retention and refuses checksum drift.
 
-Current heavy job: Strategy local configure/build, one job, no tests yet.
-Remaining: Strategy/Spotter/Tech/ML/Quality full builds/suites, native archival
-and publication tests, immutable packaging/ABI/staging, remaining focused commits
-and push. All production activation remains gated by fresh LIVE/NORMAL evidence.
+## Checkpoint at 20:06 UTC
+
+Strategy passed all 205 CTests, including eleven native integration tests.
+An initial compile correctly rejected the legacy `PathResult` passed to the v2
+evaluator; the diagnostic now uses the existing `read_price_path` API. The full
+corrected build and suite passed. Holding validation: `87ed2a1`; canonical
+diagnostic: `117f589`. No historical outcome or parameter was changed.
+
+Macro commits `7065a51` and `bee278c` and checkpoint `8fc0b29` are pushed.
+Four retained local release archives contain binaries exactly matching the
+running Macro, Strategy, Quality and Gateway hashes above. Read-only copies of
+the other three running binaries are being captured outside active trees; these
+are not complete operator-configuration/unit recovery snapshots.
+
+At 20:05–20:06 UTC VPS2 remained LIVE/HALTED, Intelligence READY/ENFORCED/D,
+Execution READY with four verified native positions and zero UNKNOWN orders.
+A read-only owner-table join verified four OPEN positions with PLACED,
+reduce-only STOPs, exact `actual_quantity = quantity = verified_quantity`:
+DOGEUSDT SHORT 268, HBARUSDT SHORT 84, LINKUSDT LONG 1, SOLUSDT LONG 0.2.
+Proof ages were 878–2,891 ms. No exchange request was issued for validation.
+
+Current bounded sequential queue: Spotter build, then Tech, ML and Quality.
+Remaining: those four full builds/suites, native archival/publication tests,
+immutable packaging/ABI/staging and remaining focused commits/push. All
+production activation remains gated by fresh LIVE/NORMAL evidence. No production
+service has been restarted, no configuration changed and no migration applied.
