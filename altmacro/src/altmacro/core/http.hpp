@@ -44,7 +44,7 @@ struct HttpOptions {
     std::string user_agent;
 };
 
-// Synchronous HTTPS/1.1 client (Boost.Beast + OpenSSL, certificate
+// Synchronous facade over bounded asynchronous HTTPS (Boost.Beast + OpenSSL, certificate
 // verification enforced). Keeps the connection alive between calls and
 // re-establishes it transparently. One instance per thread.
 //

@@ -23,3 +23,13 @@ target_compile_definitions(altmacro_tests PRIVATE
 
 include(Catch)
 catch_discover_tests(altmacro_tests)
+
+add_executable(altmacro_http_probe tools/http_probe.cpp)
+target_link_libraries(altmacro_http_probe PRIVATE altmacro_core)
+add_library(altmacro_stall_dns SHARED tools/stall_dns.c)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME controlled_https
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/controlled_https.py
+            $<TARGET_FILE:altmacro_http_probe> $<TARGET_FILE:altmacro_stall_dns>)
+set_tests_properties(controlled_https PROPERTIES TIMEOUT 45)
+
