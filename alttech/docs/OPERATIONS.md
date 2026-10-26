@@ -37,7 +37,8 @@ successful archive transaction; failed storage is retried without publication.
 This is prospective behavior: no old feature row is rewritten to repair history,
 no feature order/schema identity changes, and an earlier cutoff excludes later
 replacement knowledge. The current single-row key does not reconstruct an older
-method snapshot after replacement.
+method snapshot after replacement. Service readiness/reservation/logging derive
+from the same six-role launch inventory.
 
 Do not recreate the schema or bypass a failed `alttech-schema.service` when
 activating these changes. Its existing checksum/dependency problem requires

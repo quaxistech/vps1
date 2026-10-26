@@ -169,3 +169,10 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/macro_availability_sql.py)
     set_tests_properties(macro_availability_sql PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
+
+add_executable(alttech_inventory_tests unit/test_module_inventory.cpp)
+target_link_libraries(alttech_inventory_tests PRIVATE Catch2::Catch2WithMain alttech_application
+    alttech_feature_module alttech_microstructure_module alttech_structure_module
+    alttech_regime_module alttech_cross_venue_module alttech_macro_module)
+target_include_directories(alttech_inventory_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/include")
+catch_discover_tests(alttech_inventory_tests PROPERTIES LABELS unit)

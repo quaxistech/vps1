@@ -21,7 +21,7 @@ struct ModuleFailure {
     alttech::Error error;
 };
 
-// Coordinates the four in-process analytics modules. A module reports ready
+// Coordinates the configured in-process analytics modules. A module reports ready
 // only after its external resources have been validated and its subscriptions
 // are active. The first failure stops the complete process.
 class ModuleSupervisor {
