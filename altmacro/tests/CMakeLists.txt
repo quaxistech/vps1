@@ -33,3 +33,9 @@ add_test(NAME controlled_https
             $<TARGET_FILE:altmacro_http_probe> $<TARGET_FILE:altmacro_stall_dns>)
 set_tests_properties(controlled_https PROPERTIES TIMEOUT 45)
 
+add_executable(altmacro_publication_probe tools/publication_probe.cpp)
+target_link_libraries(altmacro_publication_probe PRIVATE altmacro_core)
+add_test(NAME controlled_publication
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/controlled_publication.py
+            $<TARGET_FILE:altmacro_publication_probe>)
+set_tests_properties(controlled_publication PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)

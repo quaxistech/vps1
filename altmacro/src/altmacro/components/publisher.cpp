@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <openssl/evp.h>
+#include <stdexcept>
 
 namespace altmacro::components {
 
@@ -29,6 +31,22 @@ std::string Publisher::message_id(const data::SourceBinding& b, const std::strin
                                   int64_t event_time_ms, domain::PriceBasis basis) {
     return b.instrument_code + "|" + b.provider_code + "|" + timeframe + "|" +
            domain::to_string(basis) + "|" + std::to_string(event_time_ms);
+}
+
+std::string Publisher::revision_message_id(std::string_view payload) {
+    auto semantic = nlohmann::json::parse(payload);
+    semantic.erase("ingest_time");
+    const auto bytes = semantic.dump();
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int size = 0;
+    if (EVP_Digest(bytes.data(), bytes.size(), digest, &size, EVP_sha256(), nullptr) != 1)
+        throw std::runtime_error("publication identity digest failed");
+    constexpr char hex[] = "0123456789abcdef";
+    std::string id = "altmacro-v2|";
+    for (unsigned int i = 0; i < size; ++i) {
+        id += hex[digest[i] >> 4]; id += hex[digest[i] & 15];
+    }
+    return id;
 }
 
 namespace {
@@ -85,7 +103,7 @@ Result<int64_t> Publisher::publish_bars(const data::SourceBinding& b, const std:
 
         const std::string payload = msg.dump();
         auto r = nats_->js_publish(subject, payload,
-                                   message_id(b, timeframe, bar.event_time_ms, bar.basis),
+                                   revision_message_id(payload),
                                    cfg_.publish_timeout_ms);
         if (!r) return std::unexpected(r.error());
         ++published;
@@ -120,8 +138,7 @@ Result<int64_t> Publisher::publish_reference(const data::SourceBinding& b,
 
         const std::string payload = msg.dump();
         auto r = nats_->js_publish(subject, payload,
-                                   message_id(b, b.native_frequency, v.event_time_ms,
-                                              domain::PriceBasis::not_applicable),
+                                   revision_message_id(payload),
                                    cfg_.publish_timeout_ms);
         if (!r) return std::unexpected(r.error());
         ++published;

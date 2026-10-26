@@ -2,7 +2,7 @@
 
 #include "altmacro/core/logger.hpp"
 
-#include <nats/nats.h>
+#include <nats.h> // the pinned FetchContent header, not a system SDK version
 
 #include <cstring>
 #include <string>

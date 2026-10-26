@@ -55,6 +55,10 @@ public:
                                                 const std::string& timeframe, int64_t event_time_ms,
                                                 domain::PriceBasis basis);
 
+    // Semantic content identity: corrections differ, identical observations
+    // deduplicate even when their transport ingest timestamp changes.
+    [[nodiscard]] static std::string revision_message_id(std::string_view payload);
+
     static constexpr const char* kSchemaVersion = "altmacro-series:1";
 
 private:
