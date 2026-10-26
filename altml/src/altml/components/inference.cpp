@@ -7,6 +7,7 @@
 #include "altml/components/econ_logic.hpp"
 #include "altml/components/feature_recipe.hpp"
 #include "altml/components/inference_logic.hpp"
+#include "altml/components/feature_archive.hpp"
 #include "altml/components/trainer_logic.hpp"
 #include "altml/core/codec.hpp"
 #include "altml/core/hash.hpp"
@@ -562,38 +563,23 @@ public:
     // for live order attribution, not model training). AltML archives every
     // VALID vector it consumes here, building its own sufficiently long,
     // real-observed training substrate (see altml.feature_vectors retention).
-    // Best-effort: a failed archive write never blocks live inference or the
-    // NATS ack.
-    void archive_feature_vector(const altml::v1::Envelope& env,
+    // The original live vector must commit before inference or input ACK.
+    Result<void> archive_feature_vector(const altml::v1::Envelope& env,
                                 const altml::v1::FeatureVectorV1& fv,
-                                const std::string& tf_label) {
+                                const std::string& tf_label, std::string_view original_payload) {
         // exchange_id and timeframe were the literals `1` and `'1m'` here. That
         // was harmless only while the subscription could deliver nothing else:
         // the moment a second venue or grid arrives, a literal files Binance's
         // 5m vector under Bitget 1m and the corruption is invisible, because
         // every column still looks plausible. They are parameters now.
-        auto res = pool_.with_txn([&](pqxx::work& txn) {
-            txn.exec_params(
-                "INSERT INTO altml.feature_vectors (exchange_id, instrument_id, timeframe, "
-                "bar_open_time, bar_revision, feature_set_name, feature_set_version, "
-                "schema_hash, engine_version, values, validity_bitmap, quality_status, "
-                "computed_at, ingest_path) "
-                "VALUES ($1, $2, $3, to_timestamp($4::bigint / 1000.0), $5, $6, $7, $8, $9, "
-                "$10::real[], $11::bytea, 'VALID', to_timestamp($12::bigint / 1000.0), 'live') "
-                "ON CONFLICT (exchange_id, instrument_id, timeframe, bar_open_time, "
-                "bar_revision, schema_hash) DO NOTHING",
-                static_cast<int>(env.exchange()), env.instrument_id(), tf_label,
-                fv.bar_open_time_ms(), fv.bar_revision(),
-                fv.feature_set_name(), fv.feature_set_version(),
-                resolved_schema_hash(fv.feature_set_name(), fv.feature_set_version(),
-                                     fv.schema_hash()),
-                fv.engine_version(), training::pg_float_array_literal(fv.values()),
-                training::pg_bytea_hex_literal(fv.validity_bitmap()), fv.computed_at_ms());
-        });
+        const auto schema = resolved_schema_hash(fv.feature_set_name(), fv.feature_set_version(), fv.schema_hash());
+        auto res = inference::archive_live_feature(pool_, env, fv, tf_label, schema, original_payload);
         if (!res) {
             archive_failed_.fetch_add(1, std::memory_order_relaxed);
             log::warn("feature_vector_archive_failed", {{"message", res.error().message}});
+            return std::unexpected(res.error());
         }
+        return {};
     }
 
     // Pull upstream vectors AltTech still holds but this archive has not seen.
@@ -963,7 +949,7 @@ public:
         return nullptr;
     }
 
-    Result<bool> on_feature_vector(const altml::v1::Envelope& env) {
+    Result<bool> on_feature_vector(const altml::v1::Envelope& env, std::string_view original_payload) {
         const auto& fv = env.feature_vector();
         const int64_t now = timeutil::now_ms();
 
@@ -976,7 +962,8 @@ public:
             not_valid_skipped_.fetch_add(1, std::memory_order_relaxed);
         }
         if (tf && fv.status() == altml::v1::FEATURE_STATUS_VALID) {
-            archive_feature_vector(env, fv, *tf);
+            auto archived = archive_feature_vector(env, fv, *tf, original_payload);
+            if (!archived) return std::unexpected(archived.error());
             remember_aligned(env, fv, *tf);
             remember_spread(env, fv, *tf);
         }
@@ -1384,7 +1371,7 @@ void InferenceComponent::run() {
                 }
                 continue;
             }
-            auto handled = service.on_feature_vector(env);
+            auto handled = service.on_feature_vector(env, raw);
             if (!handled) {
                 log::warn("inference_message_retry",
                           {{"symbol", env.exchange_symbol()},

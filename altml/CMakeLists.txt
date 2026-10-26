@@ -115,9 +115,13 @@ install(PROGRAMS
     scripts/provision.sh
     scripts/install-systemd-units.sh
     scripts/db-bootstrap.sh
+    scripts/apply-additive-migrations.sh
     DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES db/schema.sql
     DESTINATION "${CMAKE_INSTALL_DATADIR}/altml/db")
+install(DIRECTORY db/migrations/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/altml/db/migrations"
+    FILES_MATCHING PATTERN "*.sql")
 install(DIRECTORY proto/
     DESTINATION "${CMAKE_INSTALL_DATADIR}/altml/proto"
     FILES_MATCHING PATTERN "*.proto")

@@ -28,3 +28,21 @@ published and archives it as-is (see [DATABASE.md](DATABASE.md)).
 
 Never disable feature-count validation, never keep a stale schema hash, and
 never zero-fill a missing feature without treating it as invalid input.
+
+### Original live input durability
+
+A consumed VALID live vector must commit before inference or input ACK. Archive
+failure returns through the existing bounded NAK path, including when no model
+is loaded. An additive nullable `original_live_payload` column retains the first
+original AltTech envelope even when a backfill already occupies the feature key.
+Existing feature values, keys, training reads and partition retention remain
+unchanged. Identical vector republishing can change transport metadata; a
+conflicting live vector under the same archive key is refused, not falsely ACKed.
+Old NULL evidence is not reconstructed or relabelled as original live data.
+
+Apply the packaged `apply-additive-migrations.sh` as the schema owner using the
+existing PG connection environment, with `PGDATABASE` explicit. It checks its
+owner-scoped checksum ledger and uses bounded DDL locks/statements. Do not run
+full-schema bootstrap, recreate tables or change the old schema fingerprint.
+The nullable extension can remain when rolling the executable back. Check disk
+headroom for prospective original-input evidence before activation.

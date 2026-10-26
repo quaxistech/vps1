@@ -30,3 +30,29 @@ foreach(args IN ITEMS "--help" "--version" "run;--help" "train;--help"
     add_test(NAME "altml_cli_${test_suffix}" COMMAND $<TARGET_FILE:altml> ${args})
     set_tests_properties("altml_cli_${test_suffix}" PROPERTIES LABELS unit)
 endforeach()
+
+add_executable(altml_archive_tests unit/test_feature_archive.cpp)
+target_include_directories(altml_archive_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(altml_archive_tests PRIVATE ALTML_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(altml_archive_tests PRIVATE altml_core altml_proto_alttech Catch2::Catch2WithMain)
+catch_discover_tests(altml_archive_tests PROPERTIES LABELS integration)
+
+# Exercise the same inference translation unit and ACK/NAK loop as the daemon.
+# The compiler cache can reuse its object; no production-only test hooks.
+add_executable(altml_archive_consumer_probe integration/archive_consumer_probe.cpp
+    ../src/altml/components/inference.cpp)
+target_compile_definitions(altml_archive_consumer_probe PRIVATE
+    ALTML_VERSION="${PROJECT_VERSION}")
+set_source_files_properties(integration/archive_consumer_probe.cpp PROPERTIES
+    COMPILE_DEFINITIONS ALTML_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(altml_archive_consumer_probe PRIVATE "${lightgbm_SOURCE_DIR}/include")
+target_link_libraries(altml_archive_consumer_probe PRIVATE
+    altml_core altml_proto_alttech _lightgbm OpenMP::OpenMP_CXX)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME altml_archive_consumer_recovery
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/integration/archive_consumer.py
+                $<TARGET_FILE:altml_archive_consumer_probe>)
+    set_tests_properties(altml_archive_consumer_recovery PROPERTIES
+        LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 180)
+endif()
