@@ -293,16 +293,15 @@ Result<int64_t> store(persistence::PgPool& pool, int64_t set_id,
                 // minute already written -- is new knowledge and moves it to
                 // now(), as every other AltTech table does on revision; left at
                 // the first write, the revised values looked as if they had
-                // been known all along. A method change is not new knowledge
-                // (the block is as-of its minute by construction) and keeps the
-                // original time. An identical recompute touches nothing.
+                // been known all along. A method change is also a later
+                // computation, even with identical values. Never backdate it.
+                // An identical same-method recompute touches nothing. This is
+                // prospective writer behavior; historical rows are not repaired.
                 "ON CONFLICT (timeframe, bar_open_time, feature_set_version_id) DO UPDATE SET "
                 "  values = EXCLUDED.values, validity_bitmap = EXCLUDED.validity_bitmap, "
                 "  status = EXCLUDED.status, valid_count = EXCLUDED.valid_count, "
                 "  method_version = EXCLUDED.method_version, updated_at = now(), "
-                "  computed_at = CASE WHEN EXCLUDED.method_version = "
-                "      alttech.macro_feature_vectors.method_version THEN now() "
-                "      ELSE alttech.macro_feature_vectors.computed_at END "
+                "  computed_at = now() "
                 "WHERE (EXCLUDED.method_version <> alttech.macro_feature_vectors.method_version "
                 "       OR EXCLUDED.valid_count >= alttech.macro_feature_vectors.valid_count) "
                 "  AND (EXCLUDED.method_version <> alttech.macro_feature_vectors.method_version "
@@ -483,9 +482,15 @@ Result<void> run_macro(const YAML::Node& config, persistence::PgPool& pool,
         }
 
         int64_t sent = 0;
+        // Wire availability follows computation and durable storage, rather
+        // than the earlier cycle-start timestamp used to select observations.
+        const int64_t available_at_ms = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
         for (const auto& v : vectors) {
+            if (!n) break; // retry next cycle; never publish an unarchived block
             if (v.t_ms <= published_through_ms || v.t_ms > now) continue;
-            if (auto p = publish(nats, v, now); !p) {
+            if (auto p = publish(nats, v, available_at_ms); !p) {
                 log::warn("macro_publish_failed",
                           {{"bar_open_ms", v.t_ms}, {"error", p.error().message}});
                 break;   // keep order: retry from this minute next cycle

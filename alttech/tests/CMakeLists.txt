@@ -162,3 +162,10 @@ add_executable(alttech_dataset_tests unit/test_dataset.cpp)
 target_link_libraries(alttech_dataset_tests PRIVATE Catch2::Catch2WithMain alttech_talib_features)
 target_include_directories(alttech_dataset_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/include")
 catch_discover_tests(alttech_dataset_tests PROPERTIES LABELS unit TIMEOUT 30)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME macro_availability_sql
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/macro_availability_sql.py)
+    set_tests_properties(macro_availability_sql PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
