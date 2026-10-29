@@ -16,7 +16,9 @@ for path in \
     src/altml/cli/train.cpp \
     proto/alttech \
     db/schema.sql \
+    db/migrations/0001_original_live_payload.sql \
     scripts/db-bootstrap.sh \
+    scripts/apply-additive-migrations.sh \
     config/altml.example.yaml \
     config/altml.env.example; do
     [[ -e "$ROOT/$path" ]] || {
@@ -28,7 +30,9 @@ done
 # The Python era is over: no scripts, no venv installer, no job exec-wrapper,
 # no requirements. The model trains inside the service binary. The fragmented
 # numbered-migration era is over too: one final db/schema.sql, no scaffolding
-# for a probabilistic v2 contract that no runtime component implements.
+# for a probabilistic v2 contract that no runtime component implements. The
+# owner-scoped additive live-payload extension is intentionally retained beside
+# the immutable bootstrap schema.
 for retired in \
     python \
     tests/python \
@@ -36,7 +40,6 @@ for retired in \
     scripts/install-ml-venv.sh \
     scripts/check-ml-build-platform.sh \
     proto/altml_v2.proto \
-    db/migrations \
     deploy/systemd/altml-dataset-build.service \
     deploy/systemd/altml-dataset-build.timer \
     deploy/systemd/altml-training.service \

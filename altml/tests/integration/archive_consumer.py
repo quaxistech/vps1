@@ -38,9 +38,13 @@ for mode in ("absent", "model"):
             try:
                 ready()
                 for phase in ("fail", "recover"):
+                    probe_env = os.environ.copy()
+                    # The test asserts actual model activation from stdout. A
+                    # systemd scope otherwise routes logs directly to journald.
+                    probe_env.pop("JOURNAL_STREAM", None)
                     result = subprocess.run([probe, dsn, f"nats://127.0.0.1:{port}", phase,
                                              mode, directory], text=True, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, timeout=40)
+                                            stderr=subprocess.STDOUT, timeout=40, env=probe_env)
                     print(result.stdout, end="")
                     assert result.returncode == 0, f"{mode}/{phase} failed"
                     if mode == "model":
