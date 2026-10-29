@@ -13,7 +13,7 @@ server = shutil.which("nats-server")
 if not dsn or not server:
     raise SystemExit(77)
 for mode in ("duplicate", "restart"):
-    for scored in ("cold", "scored"):
+    for scored in (("cold", "scored", "fresh") if mode == "restart" else ("cold", "scored")):
         with tempfile.TemporaryDirectory(prefix="altsq-publication-fixture-") as directory:
             root = Path(directory)
             with socket.socket() as sock:
@@ -37,6 +37,11 @@ for mode in ("duplicate", "restart"):
                                               stderr=subprocess.STDOUT,timeout=55)
                         print(result.stdout,end="")
                         assert result.returncode==0, f"{mode}/{scored}/{phase} failed"
+                    evidence = os.environ.get("ALTSQ_TEST_PUBLICATION_EVIDENCE_DIR")
+                    if evidence:
+                        target = Path(evidence) / f"{mode}-{scored}.bin"
+                        assert not target.exists(), "preserve previous publication evidence"
+                        shutil.copyfile(root / "publication.bin", target)
                 finally:
                     broker.terminate()
                     try: broker.wait(timeout=5)
