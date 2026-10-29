@@ -778,6 +778,7 @@ Result<domain::MacroSnapshot> JournalStore::load_macro_asof(int64_t t0_ms, int64
             "  JOIN " + schema + ".feature_set_versions fs ON fs.id = v.feature_set_version_id"
             " WHERE v.timeframe = '1m' AND fs.scope = 'GLOBAL'"
             "   AND v.bar_open_time <= to_timestamp($1::bigint / 1000.0)"
+            "   AND v.computed_at <= to_timestamp($1::bigint / 1000.0)"
             "   AND v.bar_open_time >  to_timestamp(($1::bigint - $2::bigint) / 1000.0)"
             " ORDER BY v.bar_open_time DESC LIMIT 1",
             t0_ms, max_age_ms);
