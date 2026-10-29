@@ -130,10 +130,10 @@ Result<std::unique_ptr<NatsClient>> NatsClient::connect(const std::string& url,
 
 void NatsClient::on_closed(natsConnection* /*nc*/, void* closure) {
     auto* self = static_cast<NatsClient*>(closure);
-    {
-        std::lock_guard<std::mutex> lk(self->closed_mu_);
-        self->closed_ = true;
-    }
+    // Notified under the lock: a destructor that wakes on its own and sees
+    // closed_ cannot release closed_cv_ before this call has finished with it.
+    std::lock_guard<std::mutex> lk(self->closed_mu_);
+    self->closed_ = true;
     self->closed_cv_.notify_all();
 }
 

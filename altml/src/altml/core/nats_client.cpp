@@ -2,6 +2,8 @@
 
 #include "altml/core/logger.hpp"
 
+#include <chrono>
+
 namespace altml::messaging {
 
 namespace {
@@ -112,6 +114,7 @@ Result<std::unique_ptr<NatsClient>> NatsClient::connect(const std::string& url,
                                           &client->shutting_down_);
     }
     if (s == NATS_OK) s = natsOptions_SetReconnectedCB(client->opts_, on_reconnected, nullptr);
+    if (s == NATS_OK) s = natsOptions_SetClosedCB(client->opts_, &NatsClient::on_closed, client.get());
     if (s == NATS_OK) s = natsOptions_SetErrorHandler(client->opts_, on_error, nullptr);
     if (s == NATS_OK) s = natsConnection_Connect(&client->conn_, client->opts_);
     if (s != NATS_OK) return std::unexpected(nats_error(s, "connect to NATS"));
@@ -125,11 +128,25 @@ Result<std::unique_ptr<NatsClient>> NatsClient::connect(const std::string& url,
     return client;
 }
 
+void NatsClient::on_closed(natsConnection* /*nc*/, void* closure) {
+    auto* self = static_cast<NatsClient*>(closure);
+    // Notified under the lock: a destructor that wakes on its own and sees
+    // closed_ cannot release closed_cv_ before this call has finished with it.
+    std::lock_guard<std::mutex> lk(self->closed_mu_);
+    self->closed_ = true;
+    self->closed_cv_.notify_all();
+}
+
 NatsClient::~NatsClient() {
     shutting_down_.store(true, std::memory_order_relaxed);
     if (js_ != nullptr) jsCtx_Destroy(js_);
     if (conn_ != nullptr) {
         natsConnection_Close(conn_);
+        {
+            // Bounded: a library that never calls back must not hang a stop.
+            std::unique_lock<std::mutex> lk(closed_mu_);
+            closed_cv_.wait_for(lk, std::chrono::seconds(5), [this] { return closed_; });
+        }
         natsConnection_Destroy(conn_);
     }
     if (opts_ != nullptr) natsOptions_Destroy(opts_);
