@@ -266,6 +266,46 @@ TEST_CASE("direct plan limits reject invalid ranges before proposal clamp") {
     }
 }
 
+TEST_CASE("direct invalid plan durations expire without reversed forecast clamps") {
+    const auto ctx = make_ctx(100.0);
+    for (const bool forecast : {false, true}) {
+        auto candidate = long_candidate(ctx);
+        if (!forecast) candidate.econ = {};
+        REQUIRE(candidate.econ.evaluated() == forecast);
+        auto plan = generate_plans(candidate, ctx, 2'000'000)[1];
+        for (const auto duration : {std::numeric_limits<int64_t>::min(), int64_t{-1},
+                                   int64_t{0}, int64_t{59'999}, int64_t{299'999},
+                                   kMaxHoldingMs + 1, std::numeric_limits<int64_t>::max()}) {
+            plan.max_holding_time_ms = duration;
+            const auto result = build_proposal(
+                ProposalInputs{candidate, plan, {}, {}, ctx, "invalid-hold", {}, true, 1}, 2'000'000);
+            CHECK(result.proposal_grade == Grade::invalid);
+            CHECK_FALSE(result.recommended_for_execution);
+            CHECK(result.valid_until_ms == result.created_at_ms);
+            CHECK(result.expected_holding_time_p50_ms == 0);
+            CHECK(result.expected_holding_time_p90_ms == 0);
+        }
+    }
+}
+
+TEST_CASE("supported holding boundaries preserve the signal expiry contract") {
+    const auto ctx = make_ctx(100.0);
+    const auto candidate = long_candidate(ctx);
+    auto plan = generate_plans(candidate, ctx, 2'000'000)[1];
+    for (const auto duration : {int64_t{300'000}, kMaxHoldingMs}) {
+        plan.max_holding_time_ms = duration;
+        plan.entry_fill_timeout_ms = std::min(plan.entry_fill_timeout_ms, duration);
+        plan.time_stop_at_ms = 2'000'000 + duration;
+        const auto result = build_proposal(
+            ProposalInputs{candidate, plan, {}, {}, ctx, "valid-hold", {}, true, 1}, 2'000'000);
+        CHECK(result.proposal_grade != Grade::invalid);
+        CHECK(result.valid_until_ms > result.created_at_ms);
+        CHECK(result.valid_until_ms <= result.time_stop_at_ms);
+        CHECK(result.expected_holding_time_p50_ms <= duration);
+        CHECK(result.expected_holding_time_p90_ms <= duration);
+    }
+}
+
 TEST_CASE("a warning states the observed value and the threshold it crossed") {
     // "wide spread" told an operator nothing: not how wide, not against what
     // bound, and not whether the reading was measured or the conservative
