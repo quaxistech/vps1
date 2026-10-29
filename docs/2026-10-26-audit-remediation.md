@@ -63,18 +63,18 @@ and full suites remain in progress. FIXED_LOCAL does not imply tested or deploya
 |---|---|---|---|
 | 01 | ALTMACRO-AUDIT-001 | TLS hostname verification | TESTED_LOCAL |
 | 02 | ALTSIGNALQUALITY-AUDIT-001 | Immutable publication replay | FIXED_LOCAL |
-| 03 | ALTTECH-AUDIT-001 | Macro availability on method change | FIXED_LOCAL |
-| 04 | ALTML-AUDIT-001 | Archive original features before ACK | FIXED_LOCAL |
-| 05 | ALTSPOTTER-AUDIT-001 | Effective candle UPSERT corrections | FIXED_LOCAL |
+| 03 | ALTTECH-AUDIT-001 | Macro availability on method change, Gateway T0 cutoff | FIXED_LOCAL |
+| 04 | ALTML-AUDIT-001 | Archive original features before ACK | TESTED_LOCAL |
+| 05 | ALTSPOTTER-AUDIT-001 | Effective candle UPSERT corrections | TESTED_LOCAL |
 | 06 | ALTMACRO-AUDIT-003 | Correction-aware message identity | TESTED_LOCAL |
 | 07 | ALTSTRATEGY-AUDIT-001 | Holding-window validation | TESTED_LOCAL |
 | 08 | ALTSIGNALGATEWAY-AUDIT-002 | Safe authentication skew arithmetic | TESTED_LOCAL |
 | 09 | ALTMACRO-AUDIT-002 | Bounded HTTP phases | TESTED_LOCAL |
 | 10 | ALTML-AUDIT-002 | Load verified model bytes | FIXED_LOCAL |
-| 11 | ALTSIGNALQUALITY-AUDIT-002 | Load verified model bytes | FIXED_LOCAL |
+| 11 | ALTSIGNALQUALITY-AUDIT-002 | Load verified model bytes | TESTED_LOCAL |
 | 12 | ALTSTRATEGY-AUDIT-002 | Canonical diagnostic outcomes | TESTED_LOCAL |
 | 13 | ALTSIGNALGATEWAY-AUDIT-001 | Hash exact received payload bytes | TESTED_LOCAL |
-| 14 | ALTTECH-AUDIT-002 | Six-module readiness inventory | FIXED_LOCAL |
+| 14 | ALTTECH-AUDIT-002 | Six-module readiness inventory | TESTED_LOCAL |
 
 ## Validation and releases
 
@@ -126,6 +126,31 @@ Pending: finish all seven local builds/suites, native archival/publication and
 broker tests, focused sanitizers, contract checks, focused source commits,
 immutable packages/ABI evidence and staging. Recheck production safety before
 activation; LIVE/HALTED and the existing Tech schema failure must not be bypassed.
+
+## Bounded patch and contract map
+
+| Findings | Owner and source boundary | Correction and preserved contract | Regression evidence / limit |
+|---|---|---|---|
+| 01, 09 | Macro `core/http.cpp` | Verify chain and requested host; deadline/cancellation spans DNS, TCP, TLS, write/read and shutdown. Provider credentials/targets never enter errors. Existing GET policy and body limit remain. | Controlled trusted/wrong-SAN/untrusted/expired TLS, stalled phases, NSS child reap and cancellation; release and sanitizers passed. |
+| 06 | Macro `components/publisher.cpp::revision_message_id` | Semantic content hash excludes only ingest time; corrected value/quality receives a new broker identity. Observation natural keys and FDW identity remain. | Real private JetStream duplicate, correction, restart and outage cases passed. Initial rollout may append one equivalent transport event; no stream purge. |
+| 05 | Spotter `persistence/candle_store.cpp` | Compare all effective assigned values; absent optional quantities retain known data. Receipt alone is a no-op; source is meaningful provenance. | Native test exercises both real UPSERTs and exact revision/WriteStats. Tech's revision barrier re-reads current persisted revision and recomputes before ACK; no feature formula change. |
+| 03 | Tech `modules/macro/macro_module.cpp::store/run_macro` | Method/value replacement advances computation time, wire availability follows successful storage. Keys, feature-set identity/order and model schema stay fixed. | Actual writer SQL tested against native PostgreSQL: method-only, changed values, late correction, restart and cutoff. An old cutoff gets absence after replacement; the single-row schema cannot recover the older method snapshot. |
+| 14 | Tech `application/module_inventory.hpp`, `app/main.cpp` | One six-role inventory drives supervisor size, launch, reservation and log count. Roles/order/readiness conditions stay fixed. | Inventory/readiness regression and all 135 Tech CTests passed. Existing schema-service failure remains an independent activation blocker. |
+| 04 | ML `components/inference.cpp`, `components/feature_archive.hpp` | Commit original live envelope before cache/model processing and source ACK; return persistence errors to existing 1-second NAK path. Original payload is independent of a prior backfill occupying the same key. | Native archive and actual-consumer fault/restart tests passed with absent and loaded models, delayed NAK, file-backed broker restart, original/revised vectors and duplicate forecast identity. No new queue or unbounded memory buffer. |
+| 10, 11 | ML/Quality `core/verified_artifact.hpp` and live loaders | One bounded owned buffer is hashed then loaded with the native LightGBM string API, including ML magnitude models. Existing root/schema/name/width checks stay mandatory. | Checksum, empty/NUL/missing/oversized/replaced path and hand-authored constant-model parity tests added. No training, promotion or production artifact changes. |
+| 07 | Strategy `engine/io/plan_config.hpp`, `trade_plan.cpp`, `proposal.cpp` | Explicit invalid holding hours fail before conversion/multiplication; direct duration admission precedes arithmetic and clamp. Valid default and plan formulas stay fixed. | First revision passed 205 tests. Additional malformed direct-proposal and expiry-boundary cases need a final rerun before packaging. |
+| 12 | Strategy `engine/io/maintenance_scheduler.cpp::calibrate_geometry`, `engine/outcomes.hpp` | Existing v2 path/evaluator and realized eligibility drive diagnostics; version/fill labels included. Sampling/grid/costs and active geometry unchanged. | Canonical ambiguity/gap/fill/time-stop cases and denominator regression passed. No historical outcome update or automatic parameter calibration. |
+| 08 | Gateway `domain/auth.cpp` | Reject invalid nonpositive time/negative skew, then compare unsigned distance without signed overflow. Inclusive skew window and HMAC/nonce rules stay fixed. | Full 123-test suite and focused sanitizers passed, including int64 extremes and exact window boundaries. |
+| 13 | Gateway `core/codec.cpp`, `cli/client.cpp` | Bounded raw wire scanner verifies original payload field slices in delivery and nested query responses before parse/exposure/ACK. Server hashes and framing unchanged. | Unknown/reordered fields, nested results, duplicate payloads, malformed lengths and truncation passed in release/sanitizers. |
+
+All source `.proto` files remain unchanged. Gateway protocol 2 / public signal
+schema 3 remain authoritative; internal service envelope schema numbers are not
+substituted for the public version. Existing vendored producer/consumer tests
+remain in the full suites. PostgreSQL writes remain within the owning service.
+ML forecast/Strategy cutoff and original plan geometry are unchanged. Quality
+freezes the original final envelope before its first claim, and both retry paths
+publish those exact bytes; Gateway continues hashing/storing the original source
+payload. No VPS2 source, configuration, migration or financial history is changed.
 
 ## Checkpoint at 19:30 UTC
 
@@ -183,3 +208,154 @@ Remaining: those four full builds/suites, native archival/publication tests,
 immutable packaging/ABI/staging and remaining focused commits/push. All
 production activation remains gated by fresh LIVE/NORMAL evidence. No production
 service has been restarted, no configuration changed and no migration applied.
+
+At 20:10 UTC review found the forecast holding-estimate clamp also needed a
+guard for direct malformed `TradePlanVariant` callers, independently of the
+already validated `PlanConfig` path. Invalid durations now expire immediately
+and carry zero holding estimates; valid plans keep their formulas. Two more
+regression cases cover forecast/no-forecast and supported expiry boundaries.
+Finding 07 is returned to FIXED_LOCAL until the final Strategy rerun. The prior
+205-test result applies to the preceding source only. Rerun Strategy after the
+current heavy sequence; do not package its stale build.
+
+## Resumption on 2026-10-29
+
+Spotter completed its full CTest invocation: 47 Catch cases and 6,870
+assertions passed, with one unrelated PostgreSQL-restart integration case
+explicitly skipped because no local restart command was provided. The actual
+candle correction case ran. Tech completed all 135 CTests, including the
+inventory and native PostgreSQL macro-availability tests. Commits are
+`d7617e9` (Spotter), `b1799c1` (Tech availability) and `7d4ec93` (Tech
+inventory); these were local and unpushed at resumption.
+
+ML's first run passed 86/88 tests and failed two: the release-layout test still
+prohibited the newly required additive migration directory, and the new
+consumer fixture could not observe model-activation logs while systemd directed
+them to journald. The release contract now requires the specific extension and
+runner; the isolated probe explicitly logs to stdout. The corrected ML suite
+passed all 88 tests, including both actual-consumer modes; the initial failure
+log is preserved. One additional malformed-model regression is pending. Quality
+and the final Strategy rerun follow serially under the same aggregate resource
+limits. The skipped
+Spotter PostgreSQL-restart case will be run separately against the local fixture.
+An additional isolated test now exercises the actual Quality evaluator through
+failed publication, NAK/redelivery, duplicate and process-restart recovery,
+frozen bytes and conflicting same-ID input; it has not yet been compiled or run.
+Macro and Gateway's earlier successful sanitizer outputs were under `/tmp` and
+are no longer present; their preserved sanitizer binaries will be rerun, with
+new logs retained in the task evidence directory.
+
+At 05:55 UTC on October 29, all seven VPS1 daemons, PostgreSQL and NATS were
+active; `alttech-schema.service` remained failed. VPS2 independently remained
+LIVE/HALTED with kill switch false, gates passing, ENFORCED/D, `rp_live_v10`,
+zero held positions and zero UNKNOWN orders; all nine reconciliation scopes
+were RECONCILED. The earlier four-position snapshot is historical, not current.
+No service was restarted on either production server, and no production
+configuration, migration, position or financial record was changed by this work.
+
+At 06:02 UTC a read-only cross-check found the VPS2 Ingest status file still
+displayed cursor/head/watermark 32370 from the long-lived session. Current owner
+data showed Gateway journal head and VPS2 client acknowledgement at 38603,
+and VPS2's persisted ingest watermark and newest stored signal also at 38603;
+the last signal was received and ACKed at 06:02:05 UTC. This is a pre-existing
+status-versus-owner-data discrepancy; do not treat the status values as current
+cursor proof or change VPS2 as part of this task. Source inspection shows the
+displayed Gateway cursor/head are session observations. Final deployment
+preflight must use fresh owner data and validate recovery independently.
+
+At 06:06–06:09 UTC all seven running executable hashes matched the October 26
+baseline. Macro's process had independently restarted on October 27 at 03:17:35
+UTC (systemd reports one restart); no restart was initiated by this task. Its
+restart-window journal entries are unavailable, so the cause, interruption and
+recovery gap are not established. Current owner metadata shows provider IDs 1,
+2 and 5 succeeded recently with zero consecutive failures; this demonstrates
+ongoing polling, not complete historical coverage. The old `macro_ingest_runs`
+rows record bootstrap activity and alone do not measure current polling.
+
+At 06:26 UTC the bounded serial queue remains in Quality's first build (94/139);
+Strategy follows it. ML's successful full `LastTest.log` and the retained full
+Spotter/Tech/Macro/Gateway logs were copied into the task evidence directory
+before focused runs can overwrite them. Commit `1e3dad4` documents the ML
+additive migration, storage overhead, NAK and executable-rollback limitations.
+The existing actual ML loader fixture is being extended with invalid root,
+schema, width, checksum, native format and classifier/magnitude shape cases;
+these additions are untested and must not be counted yet. The final focused
+script now rebuilds the changed probes and reruns full Quality/ML suites, then
+the preserved Gateway/Macro sanitizers and skipped Spotter restart case.
+
+Read-only VPS1 ABI evidence was refreshed at 06:24 UTC. The packaging helper
+now checks version requirements against each exact target soname's defined
+ELF versions, as well as runtime-library availability and local RPATH absence.
+The prior October 26 runtime evidence is retained. No candidate has been
+packaged, uploaded, installed or activated at this checkpoint.
+
+Scoped review of finding 03 found Gateway's `load_macro_asof` bounded only bar
+time, allowing later Tech computations into an earlier T0 enrichment. A narrow
+`computed_at <= T0` reader predicate and actual `JournalStore` PostgreSQL test
+are now added but untested. Gateway must be rebuilt and its full suite rerun
+serially in the final focused queue before packaging. This extends finding 03
+across its necessary consumer boundary without a schema or protocol change.
+
+The other direct table reader is ML's macro backfill, which preserves the
+producer's computation time in its owned archive. The econ training and
+replay use `aligned_source_sql_pit` (`source.computed_at <= target.computed_at`).
+Strategy has no direct reader of this table. The retained legacy training join
+uses the older bar-time rule; that pre-existing compatibility limitation is
+not a claim of causal legacy retraining. No training or model promotion is run.
+At 06:36:36 UTC a read-only check of `/etc/altml/altml.yaml` observed the
+explicit `training.mode: econ`. This is deployed-file configuration evidence;
+legacy remains source-reachable if selected. Only the non-secret mode enum was
+reported, in `ml-deployed-training-mode-20261029.json`.
+
+At 06:42:50 UTC the resumed serial queue completed successfully. Quality passed
+147/147 CTests, including the checksummed malformed-model case; Strategy's final
+holding-clamp revision passed 207/207, including eleven native integration tests.
+Their full logs were preserved before any focused run. The Gateway T0 reader
+correction is checkpointed as `7ae9cb6`, explicitly untested until its queued
+build/suite completes.
+
+The revised final focused queue is now running under the same aggregate
+resource limits. It separately configures/builds Quality's evaluator probe and
+runs the full suite, then builds/runs ML's full suite with nine real-loader
+refusals, Gateway's full suite with the native cutoff and exact recovered
+Quality-envelope validation, Gateway/Macro sanitizers, and Spotter's previously
+skipped private PostgreSQL restart case. Quality now includes an actual fresh
+model-absent claim before failed publication and a restart under changed policy,
+in addition to hand-authored first claims for historical scored/cold evidence.
+These additional tests remain pending at this checkpoint.
+
+The first final-focused invocation failed compiling the new Quality probe:
+it lacked the codec/generated-protobuf include, leaving the protobuf namespaces
+undeclared. No test ran in that invocation. The explicit include is added and
+the queue was restarted serially; the full initial failure is retained as
+`final-focused-tests-first-failure-20261029.log`. Staging preflight at 06:43:56
+UTC found the proposed task-owned VPS1 directory absent and 64,869,158,912 free
+bytes. No remote directory has yet been created.
+
+## Resumption 2026-10-29 15:45–19:36 UTC (Claude)
+
+Root cause of the two ML failures (`altml_archive_consumer_recovery`,
+`altml_model_loader_refusals`): a NatsClient teardown race, not the loader or
+the archive. The destructor closed the connection and freed the client while
+the library's disconnected callback was still queued on its own thread; the
+callback then read `shutting_down_` from freed memory and logged through a
+logger that `exit()` had already destroyed (gdb: SIGSEGV in
+`spdlog::sinks::sink::should_log` from `on_disconnected`, main in `_dl_fini`;
+`ml-teardown-gdb-20261029.log`). Intermittent, so one run of each passed and
+the next failed. Quality and Strategy already waited for the closed callback;
+ML, Gateway, Macro, Spotter and Tech did not, and every daemon stops the same
+way the probe does. All six now wait (bounded, 5 s) for the closed callback,
+the last one the library queues for a connection, and notify under the lock
+so a destructor that wakes on its own cannot release the condition variable
+first (Quality and Strategy received that one-line change too).
+
+Results, serial, same resource limits (`queue-20261029-nats-*.log`):
+ML 89/89, then both former failures 10/10 repeats; Quality 148/148 (fresh
+publication evidence `quality-final-fixtures-20261029-nats-fvDBES`); Gateway
+125/125 including the untested T0 cutoff reader (`7ae9cb6`) and recovered
+Quality envelopes; Macro 74/74; Spotter full suite and the previously skipped
+private PostgreSQL restart case; Tech 135/135; Strategy 207/207; preserved
+Gateway sanitizer binary 19 cases / 174 assertions; Macro controlled HTTPS
+sanitizer cases pass. The private test cluster (unit
+`vps1-audit-pg-20261029`) had stopped at 10:54 UTC and was restarted with the
+same options. No production host was changed by this work.
