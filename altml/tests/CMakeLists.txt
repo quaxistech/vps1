@@ -65,4 +65,9 @@ if(Python3_Interpreter_FOUND)
                 $<TARGET_FILE:altml_archive_consumer_probe>)
     set_tests_properties(altml_archive_consumer_recovery PROPERTIES
         LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 180)
+    add_test(NAME altml_model_loader_refusals
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/integration/model_loader_refusals.py
+                $<TARGET_FILE:altml_archive_consumer_probe>)
+    set_tests_properties(altml_model_loader_refusals PROPERTIES
+        LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 90)
 endif()

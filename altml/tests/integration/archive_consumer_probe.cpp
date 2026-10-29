@@ -130,7 +130,8 @@ int main(int argc,char** argv) {
     try {
         require(argc==6,"arguments required");
         const std::string dsn=argv[1],url=argv[2],phase=argv[3];
-        const bool model=std::string_view(argv[4])=="model";
+        const bool model_check=phase.starts_with("model-check-");
+        const bool model=model_check || std::string_view(argv[4])=="model";
         const std::filesystem::path dir=argv[5];
         require(url.starts_with("nats://127.0.0.1:"),"local broker required");
         pqxx::connection db(dsn);
@@ -139,7 +140,7 @@ int main(int argc,char** argv) {
         auto connected=messaging::NatsClient::connect(url,"archive-consumer-fixture");
         require(bool(connected),"local broker unavailable"); auto& client=**connected;
         log::init("altml-test","fixture","info");
-        if(phase=="fail") {
+        if(phase=="fail" || model_check) {
             seed(db,dir,model);
             stream(client,"AUDIT_FEATURES","alttech.feature.>");
             stream(client,"AUDIT_PREDICTIONS","prediction.fixture.>");
@@ -157,8 +158,32 @@ int main(int argc,char** argv) {
         runtime.project.input_stream="AUDIT_FEATURES"; runtime.project.durable="audit-input";
         runtime.project.model_root=dir.string(); runtime.project.prediction_subject_prefix="prediction.fixture";
         runtime.root=YAML::Load("inference: {serve_shadow_models: false, min_backfill_free_disk_gb: 1000}");
+        if(model_check) {
+            pqxx::work tx(db);
+            const auto kind=phase.substr(std::string("model-check-").size());
+            if(kind=="path") runtime.project.model_root=(dir/"confined").string();
+            else if(kind=="schema") tx.exec("UPDATE altml.model_feature_compatibility SET schema_hash='unregistered-schema'");
+            else if(kind=="width") tx.exec("UPDATE altml.model_feature_compatibility SET feature_count=feature_count+1");
+            else if(kind=="checksum" || kind=="magnitude-checksum")
+                tx.exec_params("UPDATE altml.model_artifacts SET checksum=$1 WHERE kind=$2",std::string(64,'0'),
+                               kind=="checksum"?"model":"model_up");
+            else if(kind=="magnitude-path")
+                tx.exec_params("UPDATE altml.model_artifacts SET path=$1 WHERE kind='model_up'",(dir/"missing.txt").string());
+            else {
+                const auto width=tx.exec("SELECT feature_count FROM altml.model_feature_compatibility")[0][0].as<int>();
+                std::string artifact="model", bytes;
+                if(kind=="malformed") bytes="checksummed but invalid native model";
+                else if(kind=="shape") bytes=toy(width,false);
+                else if(kind=="magnitude-shape") {artifact="model_up";bytes=toy(width+1,false);}
+                else throw std::runtime_error("unknown model-check fixture");
+                write(dir/(artifact+".txt"),bytes);
+                tx.exec_params("UPDATE altml.model_artifacts SET checksum=$1 WHERE kind=$2",sha256_hex(bytes),artifact);
+            }
+            tx.commit();
+        }
         InferenceComponent component(runtime,client);
         const auto ready=component.init(); require(bool(ready),"actual inference init failed");
+        if(model_check) {std::cout<<"PASS actual model-loader fixture "<<phase<<std::endl;return 0;}
         std::thread worker([&]{component.run();});
         struct Join { std::thread& worker; ~Join(){ShutdownToken::instance().request_stop();worker.join();} } join{worker};
         const auto original=text(dir/"original.bin"),revision=text(dir/"revision.bin");
