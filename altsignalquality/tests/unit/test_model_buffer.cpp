@@ -44,4 +44,7 @@ TEST_CASE("quality model loading keeps root, checksum and shape checks with owne
     REQUIRE(LGBM_BoosterLoadModelFromString(verified->c_str(),&iterations,&booster)==0);
     LGBM_BoosterFree(booster);
     CHECK_FALSE(LoadedModel::open(row,root));
+    // A matching checksum does not make an invalid native model usable.
+    bad=row; bad.artifact_checksum=sha256_hex("replaced after verification");
+    CHECK_FALSE(LoadedModel::open(bad,root));
 }
