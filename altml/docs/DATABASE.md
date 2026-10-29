@@ -1,7 +1,9 @@
 # Database
 
-AltML owns exactly one PostgreSQL database, schema `altml`, applied from the
-single file [../db/schema.sql](../db/schema.sql). It never creates, alters or
+AltML owns exactly one PostgreSQL database, schema `altml`, initialized from
+[../db/schema.sql](../db/schema.sql). Prospective extensions under
+`db/migrations/` use the separate additive migration runner and ledger; they do
+not rewrite that historical schema fingerprint. AltML never creates, alters or
 drops anything in AltSpotter's or AltTech's databases.
 
 ## Read-only inputs, through `postgres_fdw`
@@ -32,6 +34,13 @@ consumes from the live NATS stream into `altml.feature_vectors` as it
 arrives — the trainer then joins that local table against `altml.labels`,
 both owned by AltML, both retained long enough for the rolling training
 window.
+
+`original_live_payload` stores the first original live envelope independently
+of the existing vector values. It can therefore preserve a live observation
+even if backfill already occupied the archive key. NULL on legacy rows means
+the original live bytes are unavailable; no historical reconstruction is
+performed. See [Operations](OPERATIONS.md) for migration, capacity and recovery
+requirements.
 
 ## Tables AltML owns
 
