@@ -29,7 +29,8 @@ catch_discover_tests(altsignalgateway_tests)
 
 # Native owner-read cutoff test against a dedicated local fixture database.
 # It never runs a deployed-stack shell probe or contacts a production server.
-add_executable(altsignalgateway_macro_store_tests integration/test_macro_availability.cpp)
+add_executable(altsignalgateway_macro_store_tests integration/test_macro_availability.cpp
+    integration/test_quality_publication.cpp)
 target_link_libraries(altsignalgateway_macro_store_tests PRIVATE
     altsignalgateway_core Catch2::Catch2WithMain)
 catch_discover_tests(altsignalgateway_macro_store_tests PROPERTIES LABELS integration)
