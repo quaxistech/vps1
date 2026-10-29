@@ -52,3 +52,10 @@ within the day. See [RETENTION](RETENTION.md).
 
 Retention only ever **drops whole partitions**; it never issues row-level
 `DELETE`. See [RETENTION](RETENTION.md) and [STORAGE_BUDGET](STORAGE_BUDGET.md).
+
+Candle UPSERT revisions compare effective persisted values, including optional
+trade/taker quantities, close time, closed state, source and quality. Aggregate
+minute-count corrections also increment revision. Absent optional values retain
+known values; identical effective rows are no-ops. A local receipt timestamp
+alone is not a semantic revision. Source corrections are semantic provenance
+changes. Existing natural keys, revision counters and retention are unchanged.

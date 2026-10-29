@@ -14,6 +14,7 @@ add_executable(altspotter_tests
     test_history_orphans_e2e.cpp
     test_depth_consistency.cpp
     test_env.cpp)
+target_sources(altspotter_tests PRIVATE test_candle_corrections.cpp)
 
 target_include_directories(altspotter_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
