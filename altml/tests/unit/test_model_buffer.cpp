@@ -39,4 +39,11 @@ TEST_CASE("LightGBM loads the verified bytes across pathname replacement") {
     CHECK(predict(*verified,false) == Catch::Approx(.25));
     CHECK(predict(path.string(),true) == Catch::Approx(.75));
     CHECK_FALSE(verified_model_bytes(path.string(),sha256_hex(original)));
+    const std::string malformed = "not a LightGBM model";
+    write(malformed);
+    const auto verified_bad = verified_model_bytes(path.string(),sha256_hex(malformed));
+    REQUIRE(verified_bad);
+    BoosterHandle invalid=nullptr; int iterations=0;
+    CHECK(LGBM_BoosterLoadModelFromString(verified_bad->c_str(),&iterations,&invalid) != 0);
+    if (invalid != nullptr) LGBM_BoosterFree(invalid);
 }
