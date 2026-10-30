@@ -17,7 +17,8 @@ enum Exchange {
     EXCHANGE_BYBIT = 4;
 }
 
-// Enum value == interval length in minutes.
+// Minute grids retain their original values. Fast windows use a separate
+// namespace; their values are identifiers, never interpreted as minutes.
 enum Timeframe {
     TIMEFRAME_UNSPECIFIED = 0;
     TF_1M = 1;
@@ -27,6 +28,10 @@ enum Timeframe {
     TF_1H = 60;
     TF_4H = 240;
     TF_1D = 1440;
+    TF_1S = 10001;
+    TF_5S = 10005;
+    TF_15S = 10015;
+    TF_30S = 10030;
 }
 
 enum CandleSource {

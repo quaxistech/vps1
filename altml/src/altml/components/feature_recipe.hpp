@@ -56,6 +56,71 @@ inline const std::vector<std::string>& talib_projection() {
     return names;
 }
 
+// recipe-2 (2026-10-30, DT-02/DT-04): recipe-1 plus the families talib-core
+// already computes and recipe-1 left out, each scale-free by construction:
+//   * candlestick integer strengths (normally -100/0/+100; confirmed Hikkake
+//     can also be -200/+200), causal on the closed bar they describe;
+//   * further bounded oscillators and fractional/normalised readings.
+// A model records the recipe it was trained on; inference serves each model
+// the projection of ITS recipe, so a recipe-1 model never receives recipe-2
+// columns. Which columns a recipe-2 model actually uses is the trainer's
+// selection on its own folds -- the recipe only makes them available.
+inline constexpr const char* kRecipeVersion2 = "recipe-2";
+
+inline const std::vector<std::string>& candlestick_projection() {
+    static const std::vector<std::string> names = {
+        "CDL2CROWS_outInteger", "CDL3BLACKCROWS_outInteger", "CDL3INSIDE_outInteger",
+        "CDL3LINESTRIKE_outInteger", "CDL3OUTSIDE_outInteger", "CDL3STARSINSOUTH_outInteger",
+        "CDL3WHITESOLDIERS_outInteger", "CDLABANDONEDBABY_outInteger", "CDLADVANCEBLOCK_outInteger",
+        "CDLBELTHOLD_outInteger", "CDLBREAKAWAY_outInteger", "CDLCLOSINGMARUBOZU_outInteger",
+        "CDLCONCEALBABYSWALL_outInteger", "CDLCOUNTERATTACK_outInteger", "CDLDARKCLOUDCOVER_outInteger",
+        "CDLDOJI_outInteger", "CDLDOJISTAR_outInteger", "CDLDRAGONFLYDOJI_outInteger",
+        "CDLENGULFING_outInteger", "CDLEVENINGDOJISTAR_outInteger", "CDLEVENINGSTAR_outInteger",
+        "CDLGAPSIDESIDEWHITE_outInteger", "CDLGRAVESTONEDOJI_outInteger", "CDLHAMMER_outInteger",
+        "CDLHANGINGMAN_outInteger", "CDLHARAMI_outInteger", "CDLHARAMICROSS_outInteger",
+        "CDLHIGHWAVE_outInteger", "CDLHIKKAKE_outInteger", "CDLHIKKAKEMOD_outInteger",
+        "CDLHOMINGPIGEON_outInteger", "CDLIDENTICAL3CROWS_outInteger", "CDLINNECK_outInteger",
+        "CDLINVERTEDHAMMER_outInteger", "CDLKICKING_outInteger", "CDLKICKINGBYLENGTH_outInteger",
+        "CDLLADDERBOTTOM_outInteger", "CDLLONGLEGGEDDOJI_outInteger", "CDLLONGLINE_outInteger",
+        "CDLMARUBOZU_outInteger", "CDLMATCHINGLOW_outInteger", "CDLMATHOLD_outInteger",
+        "CDLMORNINGDOJISTAR_outInteger", "CDLMORNINGSTAR_outInteger", "CDLONNECK_outInteger",
+        "CDLPIERCING_outInteger", "CDLRICKSHAWMAN_outInteger", "CDLRISEFALL3METHODS_outInteger",
+        "CDLSEPARATINGLINES_outInteger", "CDLSHOOTINGSTAR_outInteger", "CDLSHORTLINE_outInteger",
+        "CDLSPINNINGTOP_outInteger", "CDLSTALLEDPATTERN_outInteger", "CDLSTICKSANDWICH_outInteger",
+        "CDLTAKURI_outInteger", "CDLTASUKIGAP_outInteger", "CDLTHRUSTING_outInteger",
+        "CDLTRISTAR_outInteger", "CDLUNIQUE3RIVER_outInteger", "CDLUPSIDEGAP2CROWS_outInteger",
+        "CDLXSIDEGAP3METHODS_outInteger",
+    };
+    return names;
+}
+
+// Bounded or fractional talib-core readings recipe-1 did not take (DT-04).
+inline const std::vector<std::string>& extra_scale_free_projection() {
+    static const std::vector<std::string> names = {
+        "RSI_5_outReal", "RSI_200_outReal", "CCI_14_outReal", "CCI_50_outReal",
+        "WILLR_50_outReal", "MFI_50_outReal", "CMO_50_outReal", "ROCP_20_outReal",
+        "AROON_14_outAroonUp", "AROON_14_outAroonDown", "ADXR_14_outReal",
+        "DX_14_outReal", "STOCHF_SMA_outFastK", "STOCHRSI_14_SMA_outFastK", "HT_TRENDMODE_outInteger",
+        "HT_SINE_outSine", "HT_SINE_outLeadSine", "CORREL_14_outReal", "BETA_14_outReal",
+    };
+    return names;
+}
+
+// The talib-core projection of a recipe version; empty for one this build
+// does not know (the caller refuses it).
+[[nodiscard]] inline std::vector<std::string> projection_for(std::string_view recipe_version) {
+    if (recipe_version == kRecipeVersion) return talib_projection();
+    if (recipe_version != kRecipeVersion2) return {};
+    std::vector<std::string> names = talib_projection();
+    const std::set<std::string> taken(names.begin(), names.end());
+    for (const auto* family : {&candlestick_projection(), &extra_scale_free_projection()}) {
+        for (const auto& n : *family) {
+            if (!taken.contains(n)) names.push_back(n);
+        }
+    }
+    return names;
+}
+
 // Columns of the other sets that are levels, cumulative sums or quantities in
 // the instrument's base units -- the same objection as above -- or, for the
 // macro block, levels and publication ages that inside a few weeks of history
@@ -85,7 +150,32 @@ inline const std::set<std::string>& excluded_columns() {
 }
 
 [[nodiscard]] inline bool is_excluded(std::string_view set, std::string_view column) {
+    // Real queue OFI is in base units and raw depth depends on the instrument.
+    // Only the producer's dimensionless, continuity-qualified ratio is a model
+    // feature; the remaining fields retain observation/quality provenance.
+    if (set == "book_ofi_receipt") return column != "ofi_depth_normalized";
     return excluded_columns().contains(std::string(set) + ":" + std::string(column));
+}
+
+[[nodiscard]] inline bool source_layout_compatible(std::string_view set, int version,
+                                                   const std::vector<std::string>& columns) {
+    if (set != "book_ofi_receipt") return !columns.empty();
+    return version == 1 && columns == std::vector<std::string>{
+        "ofi_base", "ofi_depth_normalized", "ofi_event_count", "ofi_mean_depth_base"};
+}
+
+[[nodiscard]] inline bool source_method_compatible(std::string_view recipe_version,
+    std::string_view set, std::string_view engine) {
+    if (recipe_version != kRecipeVersion2 || set == "talib-core") return true;
+    // New family inputs must name the producing method in the persisted
+    // recipe, even when its column layout did not change across a repair.
+    if (engine.empty()) return false;
+    if (set == "macro-core") return engine == "mc-1.4.0";
+    if (set == "book_ofi_receipt") return engine == "alttech-ofi-1";
+    if (set == "bitget_micro") return engine == "alttech-micro-1";
+    if (set == "reference_lite" || set == "reference_lite_micro") return engine == "alttech-reference-1";
+    if (set == "cross_venue_core") return engine == "xv-1.0.0";
+    return false; // a new typed family needs an explicit adapter/contract
 }
 
 // ------------------------------------------------------------------ derived

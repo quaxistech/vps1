@@ -42,6 +42,7 @@ TEST_CASE("AltTech owns its protobuf API while preserving AltSpotter input tags"
     CHECK(field(envelope, "trade").number() == 20);
     CHECK(field(envelope, "candle").number() == 21);
     CHECK(field(envelope, "candle_batch").number() == 22);
+    CHECK(field(envelope, "order_book_delta").number() == 37);
     CHECK(field(envelope, "trade").message_type()->full_name() == "alttech.v1.Trade");
     CHECK(field(envelope, "candle").message_type()->full_name() == "alttech.v1.Candle");
     CHECK(field(envelope, "candle_batch").message_type()->full_name() ==
@@ -65,6 +66,28 @@ TEST_CASE("AltTech owns its protobuf API while preserving AltSpotter input tags"
     for (size_t index = 0; index < candle_fields.size(); ++index) {
         CHECK(field(candle, candle_fields[index]).number() == static_cast<int>(index + 1));
     }
+}
+
+TEST_CASE("validated OFI delta fields preserve exact signed base quantities and legacy absence", "[wire][ofi]") {
+    // Producer wire tags: Envelope37, delta sequence4/previous5,
+    // optional Decimal8, epoch9, counter10, optional depth Decimal11.
+    const auto current = alttech::messaging::parse_envelope(
+        decode_hex("0801aa0210200b280a42020801480750035a020814"));
+    REQUIRE(current);
+    REQUIRE(current->has_order_book_delta());
+    const auto& delta = current->order_book_delta();
+    REQUIRE(delta.has_ofi_base());
+    CHECK(delta.ofi_base().mantissa() == -1);
+    CHECK(delta.ofi_base().scale() == 0);
+    CHECK(delta.book_epoch() == 7);
+    CHECK(delta.delta_counter() == 3);
+    REQUIRE(delta.has_bbo_depth_base());
+    CHECK(delta.bbo_depth_base().mantissa() == 10);
+    const auto legacy = alttech::messaging::parse_envelope(decode_hex("0801aa0204200b280a"));
+    REQUIRE(legacy);
+    REQUIRE(legacy->has_order_book_delta());
+    CHECK_FALSE(legacy->order_book_delta().has_ofi_base());
+    CHECK(legacy->order_book_delta().delta_counter() == 0);
 }
 
 TEST_CASE("AltTech parser accepts package-agnostic AltSpotter envelope wire tags") {

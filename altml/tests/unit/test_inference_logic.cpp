@@ -188,7 +188,7 @@ TEST_CASE("consensus validity comes from quality_status, degraded stays degraded
     CHECK(out.feature_vector().status() == altml::v1::FEATURE_STATUS_WARMING);
 }
 
-TEST_CASE("the 1m microstructure window decodes; sub-minute windows are refused") {
+TEST_CASE("microstructure windows retain their distinct timeframes") {
     auto build = [](const char* window) {
         alttech::v1::Envelope in;
         in.set_schema_version(altml::messaging::kSchemaVersion);
@@ -222,11 +222,14 @@ TEST_CASE("the 1m microstructure window decodes; sub-minute windows are refused"
     // A tumbling window has no revision; 0 is the fact, not a placeholder.
     CHECK(fv.bar_revision() == 0);
 
-    // 15s and 30s windows have no bar to belong to. Refused rather than rounded
-    // into a minute they only partly cover -- which would archive a third of a
-    // minute's book activity as if it were the whole minute's.
-    CHECK_FALSE(altml::inference::repack_feature_envelope(build("15s"), &out));
-    CHECK_FALSE(altml::inference::repack_feature_envelope(build("30s"), &out));
+    for (const auto& [label, timeframe] : {
+            std::pair{"1s", altml::v1::TF_1S}, std::pair{"5s", altml::v1::TF_5S},
+            std::pair{"15s", altml::v1::TF_15S}, std::pair{"30s", altml::v1::TF_30S}}) {
+        REQUIRE(altml::inference::repack_feature_envelope(build(label), &out));
+        CHECK(out.feature_vector().timeframe() == timeframe);
+        CHECK(out.feature_vector().timeframe() != altml::v1::TF_1M);
+    }
+    CHECK_FALSE(altml::inference::repack_feature_envelope(build("2s"), &out));
 
     // WARMING stays WARMING, NOT_AVAILABLE does not become a quiet zero.
     auto warming = build("1m");
@@ -240,6 +243,41 @@ TEST_CASE("the 1m microstructure window decodes; sub-minute windows are refused"
         alttech::v1::MICROSTRUCTURE_STATUS_NOT_AVAILABLE);
     REQUIRE(altml::inference::repack_feature_envelope(unavailable, &out));
     CHECK(out.feature_vector().status() == altml::v1::FEATURE_STATUS_INVALID);
+}
+
+TEST_CASE("reference delta OFI requires the exact producer schema and keeps quality", "[ofi][wire]") {
+    alttech::v1::Envelope input;
+    input.set_schema_version(altml::messaging::kSchemaVersion);
+    input.set_exchange(alttech::v1::EXCHANGE_BINANCE);
+    input.set_canonical_pair_id(42);
+    input.set_instrument_id(42);
+    auto* m = input.mutable_venue_microstructure_vector();
+    m->set_exchange(alttech::v1::EXCHANGE_BINANCE);
+    m->set_canonical_pair_id(42);
+    m->set_window_label("5s");
+    m->set_window_start_ms(1'000'000);
+    m->set_profile("sequence_validated_delta");
+    m->set_feature_set_name("book_ofi_receipt");
+    m->set_feature_set_version(1);
+    m->set_schema_hash("d10ab556ae283a0565fd19e9d3867b5001d97b9850332b49db593989ff7d6f93");
+    m->set_engine_version("alttech-ofi-1");
+    for (const float value : {100.0f, 0.25f, 20.0f, 400.0f}) m->add_values(value);
+    m->set_validity_bitmap(std::string(1, '\x0f'));
+    m->set_status(alttech::v1::ANALYTICS_VECTOR_STATUS_VALID);
+    m->set_computed_at_ms(1'005'010);
+    altml::v1::Envelope out;
+    REQUIRE(altml::inference::repack_feature_envelope(input, &out));
+    CHECK(out.feature_vector().timeframe() == altml::v1::TF_5S);
+    CHECK(out.feature_vector().values(1) == .25f);
+    CHECK(out.feature_vector().computed_at_ms() == 1'005'010);
+    m->set_status(alttech::v1::ANALYTICS_VECTOR_STATUS_INCOMPLETE_INPUT);
+    REQUIRE(altml::inference::repack_feature_envelope(input, &out));
+    CHECK(out.feature_vector().status() == altml::v1::FEATURE_STATUS_INCOMPLETE_INPUT);
+    m->set_profile("sampled_book_imbalance");
+    CHECK_FALSE(altml::inference::repack_feature_envelope(input, &out));
+    m->set_profile("sequence_validated_delta");
+    m->set_schema_hash("wrong-order");
+    CHECK_FALSE(altml::inference::repack_feature_envelope(input, &out));
 }
 
 TEST_CASE("estimates this service does not produce are absent, not zero") {
@@ -386,4 +424,24 @@ TEST_CASE("aligned history keeps bar order whatever order the bars arrive in",
         CHECK(hist.front().bar_open_ms == 102 * kMin);
         CHECK(hist.back().bar_open_ms == 109 * kMin);
     }
+}
+
+TEST_CASE("aligned revisions retain earlier available inputs through delayed corrections",
+          "[inference][aligned][pit]") {
+    using altml::inference::AlignedObservation;
+    std::deque<AlignedObservation> hist;
+    const auto add = [&](int64_t revision, int64_t computed, int64_t received, float value) {
+        altml::inference::record_aligned_revision(hist,
+            AlignedObservation{540'000, 1, {value}, revision, computed, received}, 8);
+    };
+    add(2, 605'000, 606'000, 2.0f);
+    add(1, 600'000, 601'000, 1.0f); // older revision delivered later
+    add(1, 600'000, 601'000, 1.0f); // replay is idempotent
+    REQUIRE(hist.size() == 2);
+    CHECK(hist.front().bar_revision == 1);
+    CHECK(hist.front().values.front() == 1.0f);
+    CHECK(hist.back().bar_revision == 2);
+    std::deque<AlignedObservation> empty;
+    altml::inference::record_aligned_revision(empty, hist.front(), 0);
+    CHECK(empty.empty());
 }

@@ -3,25 +3,43 @@
 #include <zlib.h>
 
 namespace altspotter::exchanges {
+namespace {
+bool valid_levels(const std::vector<Level>& levels) {
+    for (const auto& level : levels) {
+        if (level.price <= Decimal::zero() || level.size.is_negative()) return false;
+    }
+    return true;
+}
+}
 
 void LocalBook::clear() {
     bids_.clear();
     asks_.clear();
     synced_ = false;
+    first_after_reset_ = false;
     last_seq_ = 0;
     last_exchange_ms_ = 0;
+    last_ofi_.reset();
+    delta_counter_ = 0;
+    ++epoch_;
 }
 
 void LocalBook::reset_from_rest(std::vector<Level> bids, std::vector<Level> asks,
                                 int64_t last_update_id, int64_t exchange_ms) {
     bids_.clear();
     asks_.clear();
-    for (auto& l : bids) bids_.emplace(l.price, std::move(l));
-    for (auto& l : asks) asks_.emplace(l.price, std::move(l));
+    const bool valid = valid_levels(bids) && valid_levels(asks);
+    if (valid) {
+        for (auto& l : bids) if (!l.size.is_zero()) bids_.emplace(l.price, std::move(l));
+        for (auto& l : asks) if (!l.size.is_zero()) asks_.emplace(l.price, std::move(l));
+    }
     last_seq_ = last_update_id;
     last_exchange_ms_ = exchange_ms;
-    synced_ = true;
-    first_after_reset_ = true;
+    synced_ = last_update_id > 0 && !bids_.empty() && !asks_.empty() && !crossed();
+    first_after_reset_ = synced_;
+    last_ofi_.reset();
+    delta_counter_ = 0;
+    ++epoch_;
 }
 
 template <typename Map>
@@ -46,7 +64,14 @@ void LocalBook::apply_side(std::map<Decimal, Level, std::less<Decimal>>& side,
 }
 
 BookApplyResult LocalBook::apply(const BookUpdate& u) {
+    last_ofi_.reset();
+    if (!valid_levels(u.bids) || !valid_levels(u.asks)) {
+        synced_ = false;
+        return BookApplyResult::invalid;
+    }
     if (u.is_snapshot) {
+        ++epoch_;
+        delta_counter_ = 0;
         bids_.clear();
         asks_.clear();
         apply_side(bids_, u.bids);
@@ -60,7 +85,15 @@ BookApplyResult LocalBook::apply(const BookUpdate& u) {
             synced_ = false;
             return BookApplyResult::desync_checksum;
         }
-        return crossed() ? BookApplyResult::crossed : BookApplyResult::reset;
+        if (bids_.empty() || asks_.empty()) {
+            synced_ = false;
+            return BookApplyResult::empty;
+        }
+        if (crossed()) {
+            synced_ = false;
+            return BookApplyResult::crossed;
+        }
+        return BookApplyResult::reset;
     }
 
     switch (sequencing_) {
@@ -106,6 +139,9 @@ BookApplyResult LocalBook::apply(const BookUpdate& u) {
         }
     }
 
+    const bool had_bbo = !bids_.empty() && !asks_.empty();
+    const auto previous_bid = had_bbo ? bids_.begin()->second : Level{};
+    const auto previous_ask = had_bbo ? asks_.begin()->second : Level{};
     apply_side(bids_, u.bids);
     apply_side(asks_, u.asks);
     last_seq_ = u.sequence;
@@ -116,7 +152,35 @@ BookApplyResult LocalBook::apply(const BookUpdate& u) {
         synced_ = false;
         return BookApplyResult::desync_checksum;
     }
-    return crossed() ? BookApplyResult::crossed : BookApplyResult::ok;
+    if (bids_.empty() || asks_.empty()) {
+        synced_ = false;
+        return BookApplyResult::empty;
+    }
+    if (crossed()) {
+        synced_ = false;
+        return BookApplyResult::crossed;
+    }
+    ++delta_counter_;
+    if (had_bbo && !bids_.empty() && !asks_.empty()) {
+        // e = 1[b>=b_prev]q_b - 1[b<=b_prev]q_b_prev
+        //   - 1[a<=a_prev]q_a + 1[a>=a_prev]q_a_prev.
+        // https://arxiv.org/html/1011.6402v3, equation (1).
+        const auto& bid = bids_.begin()->second;
+        const auto& ask = asks_.begin()->second;
+        if (!previous_bid.size.is_negative() && !previous_ask.size.is_negative() &&
+            !bid.size.is_negative() && !ask.size.is_negative()) {
+            Result<Decimal> flow = Decimal::zero();
+            const auto add = [&](const Decimal& size, bool negative) {
+                if (flow) flow = flow->add(negative ? Decimal{-size.mantissa(), size.scale()} : size);
+            };
+            if (bid.price >= previous_bid.price) add(bid.size, false);
+            if (bid.price <= previous_bid.price) add(previous_bid.size, true);
+            if (ask.price <= previous_ask.price) add(ask.size, true);
+            if (ask.price >= previous_ask.price) add(previous_ask.size, false);
+            if (flow) last_ofi_ = *flow;
+        }
+    }
+    return BookApplyResult::ok;
 }
 
 std::vector<Level> LocalBook::top_bids(size_t n) const {

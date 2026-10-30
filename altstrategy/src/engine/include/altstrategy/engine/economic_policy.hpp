@@ -33,9 +33,8 @@ struct EconomicPolicyConfig {
     int64_t max_forecast_age_ms = 180'000;
 };
 
-// The model horizon that answers a setup's declared holding horizon: the
-// nearest of 15m / 1h / 4h on a log scale (boundaries at the geometric
-// midpoints, 30 min and 2 h).
+// Exact supported horizon only. Zero means no compatible forecast exists;
+// setup duration/TTL is preserved and an 8h setup never receives a 4h payoff.
 [[nodiscard]] int32_t evaluation_horizon_minutes(int64_t expected_horizon_ms);
 
 [[nodiscard]] EconomicDecision evaluate_economics(Side side, int64_t expected_horizon_ms,

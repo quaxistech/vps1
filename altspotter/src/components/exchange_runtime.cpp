@@ -54,6 +54,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -590,10 +591,15 @@ private:
         BookApplyResult result;
         std::vector<Level> top_bids, top_asks;
         int64_t seq = 0;
+        std::optional<Decimal> ofi;
+        uint64_t book_epoch = 0, delta_counter = 0;
         {
             std::lock_guard lk(st->mu);
             result = st->book->apply(b.update);
             seq = st->book->last_sequence();
+            ofi = st->book->last_ofi();
+            book_epoch = st->book->epoch();
+            delta_counter = st->book->delta_counter();
             if (result == BookApplyResult::ok || result == BookApplyResult::reset) {
                 st->desynced = false;
                 top_bids = st->book->top_bids(static_cast<size_t>(snapshot_depth_));
@@ -604,11 +610,16 @@ private:
         switch (result) {
             case BookApplyResult::desync_gap:
             case BookApplyResult::desync_checksum:
+            case BookApplyResult::invalid:
                 on_book_desync(b.symbol, *ri, result, conn_id);
                 return;
             case BookApplyResult::crossed:
                 touch(b.symbol, [&](ContextState& s) { ++s.crossed; });
+                on_book_desync(b.symbol, *ri, result, conn_id);
                 return; // do not publish a crossed book as valid
+            case BookApplyResult::empty:
+                on_book_desync(b.symbol, *ri, result, conn_id);
+                return;
             case BookApplyResult::waiting:
                 // Binance builds its book from a REST depth snapshot + the
                 // pu-chained deltas; deltas before the first snapshot keep the
@@ -675,6 +686,15 @@ private:
             if (b.update.prev_sequence >= 0) delta->set_previous_sequence(b.update.prev_sequence);
             delta->set_exchange_time_ms(b.update.exchange_ms);
             if (b.update.has_checksum) delta->set_checksum(b.update.checksum);
+            if (ofi) *delta->mutable_ofi_base() = messaging::to_proto(*ofi);
+            delta->set_book_epoch(book_epoch);
+            delta->set_delta_counter(delta_counter);
+            if (!top_bids.empty() && !top_asks.empty()) {
+                if (auto depth = top_bids.front().size.add(top_asks.front().size);
+                    depth && !depth->is_negative() && !depth->is_zero()) {
+                    *delta->mutable_bbo_depth_base() = messaging::to_proto(*depth);
+                }
+            }
             (void)nats_->publish(subjects::book_delta(spec_.code, b.symbol),
                                  messaging::serialize(env));
         }
@@ -784,15 +804,16 @@ private:
         }
         touch(symbol, [&](ContextState& s) { ++s.seq_gaps; });
         if (first) {
+            const char* reason = result == BookApplyResult::desync_checksum ? "checksum mismatch" :
+                result == BookApplyResult::crossed ? "crossed book" :
+                result == BookApplyResult::empty ? "empty book" :
+                result == BookApplyResult::invalid ? "invalid book level" : "sequence gap";
             publish_integrity(symbol, ri, "book_desynced",
-                              result == BookApplyResult::desync_checksum ? "checksum mismatch"
-                                                                         : "sequence gap");
+                              reason);
             log::warn("book_desynced", {{"venue", spec_.code},
                                         {"symbol", symbol},
                                         {"connection_id", conn_id},
-                                        {"reason", result == BookApplyResult::desync_checksum
-                                                       ? "checksum"
-                                                       : "sequence"}});
+                                        {"reason", reason}});
         }
         if (spec_.sequencing == exchanges::LocalBook::Sequencing::binance_futures) {
             enqueue_resync(symbol);
@@ -820,7 +841,12 @@ private:
         auto it = books_.find(symbol);
         if (it == books_.end()) {
             auto st = std::make_unique<BookState>();
-            st->book = std::make_unique<exchanges::LocalBook>(spec_.sequencing);
+            // A process restart may reuse the logical WS connection id and
+            // venue sequence. Inject a fresh epoch identity into the pure book
+            // so consumers cannot join the two runs as one continuous stream.
+            std::random_device entropy;
+            const uint64_t epoch_seed = ((static_cast<uint64_t>(entropy()) << 32U) ^ entropy()) & 0x7fffffffffffffffULL;
+            st->book = std::make_unique<exchanges::LocalBook>(spec_.sequencing, epoch_seed);
             it = books_.emplace(symbol, std::move(st)).first;
         }
         return it->second.get();
@@ -1160,11 +1186,18 @@ private:
         auto ri = lookup(symbol);
         if (!ri) return;
         BookState* st = book_state(symbol);
+        bool seeded = false;
         {
             std::lock_guard lk(st->mu);
             st->book->reset_from_rest(std::move(snap->bids), std::move(snap->asks),
                                       snap->sequence, snap->exchange_ms);
-            st->desynced = false;
+            seeded = st->book->synced();
+            st->desynced = !seeded;
+        }
+        if (!seeded) {
+            log::warn("book_resync_invalid", {{"venue", spec_.code}, {"symbol", symbol}});
+            enqueue_resync(symbol);
+            return;
         }
         publish_integrity(symbol, *ri, "book_recovered", "REST snapshot applied");
         log::info("book_recovered", {{"venue", spec_.code}, {"symbol", symbol}});

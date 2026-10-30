@@ -1,6 +1,7 @@
 #include "altmacro/components/publisher.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 
 using altmacro::NatsConfig;
 using altmacro::components::Publisher;
@@ -50,4 +51,23 @@ TEST_CASE("the same instant from two providers is two messages", "[nats][dedup]"
     SourceBinding b; b.instrument_code = "REF.USDCNY.FED"; b.provider_code = "frankfurter";
     CHECK(Publisher::message_id(a, "daily", 1000, PriceBasis::fixing) !=
           Publisher::message_id(b, "daily", 1000, PriceBasis::fixing));
+}
+
+TEST_CASE("semantic revisions publish while transport retries deduplicate", "[nats][dedup]") {
+    nlohmann::json observation = {{"kind", "reference"}, {"instrument", "RATE.US.10Y"},
+        {"event_time_ms", 1000}, {"provider", "fred"}, {"value", 4.1},
+        {"quality", "VALID"}, {"publication_time", nullptr}, {"ingest_time", "first"}};
+    const auto original = Publisher::revision_message_id(observation.dump());
+    observation["ingest_time"] = "retry";
+    CHECK(Publisher::revision_message_id(observation.dump()) == original);
+    for (const auto& field : {"value", "quality", "publication_time", "provider", "instrument"}) {
+        auto corrected = observation;
+        corrected[field] = "correction";
+        CHECK(Publisher::revision_message_id(corrected.dump()) != original);
+    }
+    auto bar = observation; bar["kind"] = "bar"; bar["close"] = 1.2;
+    const auto bar_id = Publisher::revision_message_id(bar.dump());
+    bar["close"] = 1.3;
+    CHECK(Publisher::revision_message_id(bar.dump()) != bar_id);
+    CHECK(bar_id != original);
 }

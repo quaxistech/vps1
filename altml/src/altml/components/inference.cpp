@@ -7,9 +7,11 @@
 #include "altml/components/econ_logic.hpp"
 #include "altml/components/feature_recipe.hpp"
 #include "altml/components/inference_logic.hpp"
+#include "altml/components/feature_archive.hpp"
 #include "altml/components/trainer_logic.hpp"
 #include "altml/core/codec.hpp"
 #include "altml/core/hash.hpp"
+#include "altml/core/verified_artifact.hpp"
 #include "altml/core/logger.hpp"
 #include "altml/core/pg.hpp"
 #include "altml/core/readiness.hpp"
@@ -58,6 +60,10 @@ std::optional<std::string> timeframe_label(altml::v1::Timeframe tf) {
         case altml::v1::TF_1H: return "1h";
         case altml::v1::TF_4H: return "4h";
         case altml::v1::TF_1D: return "1d";
+        case altml::v1::TF_1S: return "1s";
+        case altml::v1::TF_5S: return "5s";
+        case altml::v1::TF_15S: return "15s";
+        case altml::v1::TF_30S: return "30s";
         default: return std::nullopt;
     }
 }
@@ -70,6 +76,7 @@ struct EconModel {
     std::string model_id;
     int model_version = 1;
     std::string objective;
+    std::string recipe_version;      // DT-02/DT-04: the recipe it was trained on; served its projection
     int horizon_minutes = 0;
     std::string schema_hash;        // the target's talib-core layout
     int published_width = 0;        // width of the vector AltTech publishes
@@ -78,6 +85,7 @@ struct EconModel {
     recipe::DerivedRecipe base_derived;
     struct Source {
         training::AlignedSource src;   // projection/positions = the columns taken
+        size_t published_width = 0;
         bool derived = false;
         recipe::DerivedRecipe recipe;
     };
@@ -118,14 +126,6 @@ std::string source_set_key(const training::AlignedSource& src) {
     return src.feature_set + ":" + std::to_string(src.feature_set_version);
 }
 
-std::string file_sha256(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in.good()) return {};
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    return sha256_hex(ss.str());
-}
-
 bool is_within(const std::filesystem::path& root, const std::filesystem::path& child) {
     auto root_it = root.begin();
     auto child_it = child.begin();
@@ -142,23 +142,33 @@ class InferenceService {
     // LATERAL over the archive; live, they arrive on the same subscription that
     // feeds the archive, so the served vector is built from what had actually
     // been received by T0 -- not from rows written after the fact.
-    struct AlignedObservation {
-        int64_t bar_open_ms = 0;
-        int32_t feature_set_version = 0;
-        std::vector<float> values;  // the FULL vector, invalid slots NaN
-    };
+    using AlignedObservation = inference::AlignedObservation;
     // venue, instrument, grid, feature set: one venue and grid publishes more
     // than one set, and they are different observations of different things.
     using AlignedKey = std::tuple<int, int64_t, std::string, std::string>;
     static constexpr size_t kAlignedHistory = 8;
+    static size_t history_limit(std::string_view timeframe) {
+        if (timeframe == "1s") return 256;
+        if (timeframe == "5s") return 128;
+        if (timeframe == "15s") return 32;
+        if (timeframe == "30s") return 16;
+        return kAlignedHistory;
+    }
 
 public:
     InferenceService(persistence::PgPool& pool, messaging::NatsClient& nats,
                      int64_t stale_after_sec, std::filesystem::path model_root,
-                     std::string subject_prefix, bool serve_shadow)
+                     std::string subject_prefix, bool serve_shadow,
+                     const std::vector<std::string>& capture_sources)
         : pool_(pool), nats_(nats), stale_after_ms_(stale_after_sec * 1000),
           model_root_(std::move(model_root)), subject_prefix_(std::move(subject_prefix)),
-          serve_shadow_(serve_shadow) {}
+          serve_shadow_(serve_shadow) {
+        for (size_t i = 0; i < capture_sources.size(); ++i) {
+            if (const auto source = training::parse_aligned_source(capture_sources[i], i)) {
+                fast_capture_sources_.insert(std::tuple{source->exchange_id, source->timeframe, source->feature_set});
+            }
+        }
+    }
 
     // Polls the registry for the ACTIVE econ models (one per objective) and
     // loads, replaces or drops them. A model whose input cannot be rebuilt
@@ -330,10 +340,33 @@ public:
                 next[row.objective] = std::move(m);
             }
         }
+        // Cost evidence has the same restart obligation as model features.
+        // Prime every frozen spread layout even if no model selected micro
+        // columns, then apply its own receipt cutoff at each target.
+        {
+            std::lock_guard lock(mu_);
+            if (!spread_pos_.empty()) {
+                training::AlignedSource spread_source;
+                spread_source.feature_set = "bitget_micro";
+                spread_source.freshness_minutes = 5;
+                spread_source.feature_set_version = spread_pos_.begin()->first;
+                for (const auto& [version, _] : spread_pos_) spread_source.equivalent_versions.push_back(version);
+                fresh_sources.push_back(std::move(spread_source));
+            }
+        }
         auto primed = load_aligned_from_archive(fresh_sources);
         std::lock_guard lock(mu_);
         for (auto& [key, obs] : primed) {
-            inference::record_in_bar_order(aligned_cache_[key], std::move(obs), kAlignedHistory);
+            if (std::get<0>(key) == 1 && std::get<2>(key) == "1m" && std::get<3>(key) == "bitget_micro") {
+                const auto pos = spread_pos_.find(obs.feature_set_version);
+                if (pos != spread_pos_.end() && pos->second < obs.values.size() &&
+                    std::isfinite(obs.values[pos->second])) {
+                    auto spread_obs = obs;
+                    spread_obs.values = {obs.values[pos->second]};
+                    inference::record_aligned_revision(spread_[std::get<1>(key)], std::move(spread_obs), kAlignedHistory);
+                }
+            }
+            inference::record_aligned_revision(aligned_cache_[key], std::move(obs), history_limit(std::get<2>(key)));
         }
         models_ = std::move(next);
     }
@@ -357,7 +390,7 @@ public:
         auto res = pool_.with_txn([&](pqxx::work& txn) {
             for (const auto& src : sources) {
                 if (!seen.insert(std::to_string(src.exchange_id) + ":" + src.timeframe + ":" +
-                                 source_set_key(src) + ":" +
+                                 source_set_key(src) + ":" + src.engine_version + ":" +
                                  std::to_string(src.pinned_instrument_id.value_or(-1)))
                          .second) {
                     continue;
@@ -368,13 +401,15 @@ public:
                     versions += std::to_string(v);
                 }
                 versions += "}";
-                const int64_t window_min =
-                    static_cast<int64_t>(src.span_minutes) * static_cast<int64_t>(kAlignedHistory + 1) +
+                const int64_t window_min = (training::source_span_ms(src) *
+                    static_cast<int64_t>(history_limit(src.timeframe) + 1) + 59'999) / 60'000 +
                     src.freshness_minutes;
                 std::string sql =
                     "SELECT instrument_id, (extract(epoch FROM bar_open_time) * 1000)::bigint, "
-                    "       feature_set_version, values::text, validity_bitmap::text "
-                    "FROM altml.feature_vectors "
+                    "       feature_set_version, values::text, validity_bitmap::text, bar_revision, "
+                    "       (extract(epoch FROM computed_at) * 1000)::bigint, "
+                    "       (extract(epoch FROM received_at) * 1000)::bigint, engine_version "
+                    "FROM altml.econ_feature_vectors "
                     "WHERE exchange_id = $1 AND timeframe = $2 AND feature_set_name = $3 "
                     "AND feature_set_version = ANY($4::int[]) AND quality_status = 'VALID' "
                     "AND bar_open_time >= now() - make_interval(mins => $5::int) ";
@@ -387,6 +422,10 @@ public:
                     AlignedObservation obs;
                     obs.bar_open_ms = r[1].as<int64_t>();
                     obs.feature_set_version = r[2].as<int32_t>();
+                    obs.bar_revision = r[5].as<int64_t>();
+                    obs.computed_at_ms = r[6].as<int64_t>();
+                    obs.received_at_ms = r[7].as<int64_t>();
+                    obs.engine_version = r[8].as<std::string>();
                     obs.values = training::parse_pg_float_array(r[3].as<std::string>());
                     const auto bmp = training::parse_pg_hex_bytea(r[4].as<std::string>());
                     for (size_t i = 0; i < obs.values.size(); ++i) {
@@ -430,7 +469,7 @@ public:
         if (!objective.starts_with(econ::kObjectivePrefix)) return refuse("objective_not_served");
         const auto horizon = econ::objective_horizon_minutes(objective);
         if (!horizon) return refuse("unknown_horizon");
-        if (recipe_version != recipe::kRecipeVersion) return refuse("recipe_version_unknown");
+        if (recipe::projection_for(recipe_version).empty()) return refuse("recipe_version_unknown");
 
         std::error_code root_error, artifact_error;
         const auto canonical_root = std::filesystem::weakly_canonical(model_root_, root_error);
@@ -439,12 +478,14 @@ public:
             return refuse("model_path_outside_root");
         }
         const std::string safe_path = canonical_artifact.string();
-        if (file_sha256(safe_path) != checksum) return refuse("checksum_mismatch");
+        auto model_bytes = verified_model_bytes(safe_path, checksum);
+        if (!model_bytes) return refuse("checksum_mismatch");
 
         auto m = std::make_unique<EconModel>();
         m->model_id = model_id;
         m->model_version = version;
         m->objective = objective;
+        m->recipe_version = recipe_version;
         m->horizon_minutes = *horizon;
         m->schema_hash = hash;
         m->published_width = static_cast<int>(core_layout.size());
@@ -485,9 +526,12 @@ public:
             if (!parsed) return refuse("aligned_source_unusable");
             EconModel::Source s;
             s.src = *parsed;
+            if (!recipe::source_method_compatible(recipe_version, s.src.feature_set, s.src.engine_version))
+                return refuse("source_method_unpinned_or_incompatible");
             if (s.src.feature_set == altml::analytics::kCoreFeatureSetName) {
+                s.published_width = core_layout.size();
                 s.src.equivalent_versions = {analytics::kCoreFeatureSetVersion};
-                for (const auto& n : recipe::talib_projection()) {
+                for (const auto& n : recipe::projection_for(recipe_version)) {
                     const auto it = std::find(core_layout.begin(), core_layout.end(), n);
                     if (it == core_layout.end()) return refuse("source_projection_unresolved");
                     s.src.projection.push_back(n);
@@ -503,6 +547,9 @@ public:
                 }
                 s.src.equivalent_versions = it->second.second;
                 const auto& layout = it->second.first;
+                if (!recipe::source_layout_compatible(s.src.feature_set, s.src.feature_set_version, layout))
+                    return refuse("source_layout_incompatible");
+                s.published_width = layout.size();
                 for (size_t k = 0; k < layout.size(); ++k) {
                     if (recipe::is_excluded(s.src.feature_set, layout[k])) continue;
                     s.src.projection.push_back(layout[k]);
@@ -518,7 +565,7 @@ public:
         if (sha256_hex(recipe::joined_names(names)) != names_sha) return refuse("feature_names_mismatch");
 
         int iterations = 0;
-        if (LGBM_BoosterCreateFromModelfile(safe_path.c_str(), &iterations, &m->booster) != 0) {
+        if (LGBM_BoosterLoadModelFromString(model_bytes->c_str(), &iterations, &m->booster) != 0) {
             return refuse("model_load_failed");
         }
         int nf = 0, nc = 0;
@@ -544,9 +591,10 @@ public:
                 std::error_code ae;
                 const auto canon = std::filesystem::canonical(apath, ae);
                 if (ae || !is_within(canonical_root, canon)) return refuse("magnitude_path_outside_root");
-                if (file_sha256(canon.string()) != asum) return refuse("magnitude_checksum_mismatch");
+                auto magnitude_bytes = verified_model_bytes(canon.string(), asum);
+                if (!magnitude_bytes) return refuse("magnitude_checksum_mismatch");
                 int it = 0;
-                if (LGBM_BoosterCreateFromModelfile(canon.string().c_str(), &it, handle) != 0) {
+                if (LGBM_BoosterLoadModelFromString(magnitude_bytes->c_str(), &it, handle) != 0) {
                     return refuse("magnitude_model_load_failed");
                 }
                 int mf = 0, mc = 0;
@@ -562,38 +610,26 @@ public:
     // for live order attribution, not model training). AltML archives every
     // VALID vector it consumes here, building its own sufficiently long,
     // real-observed training substrate (see altml.feature_vectors retention).
-    // Best-effort: a failed archive write never blocks live inference or the
-    // NATS ack.
-    void archive_feature_vector(const altml::v1::Envelope& env,
+    // The original live vector must commit before inference or input ACK.
+    Result<void> archive_feature_vector(const altml::v1::Envelope& env,
                                 const altml::v1::FeatureVectorV1& fv,
-                                const std::string& tf_label) {
+                                const std::string& tf_label, std::string_view original_payload,
+                                int64_t* durable_received_at_ms) {
         // exchange_id and timeframe were the literals `1` and `'1m'` here. That
         // was harmless only while the subscription could deliver nothing else:
         // the moment a second venue or grid arrives, a literal files Binance's
         // 5m vector under Bitget 1m and the corruption is invisible, because
         // every column still looks plausible. They are parameters now.
-        auto res = pool_.with_txn([&](pqxx::work& txn) {
-            txn.exec_params(
-                "INSERT INTO altml.feature_vectors (exchange_id, instrument_id, timeframe, "
-                "bar_open_time, bar_revision, feature_set_name, feature_set_version, "
-                "schema_hash, engine_version, values, validity_bitmap, quality_status, "
-                "computed_at, ingest_path) "
-                "VALUES ($1, $2, $3, to_timestamp($4::bigint / 1000.0), $5, $6, $7, $8, $9, "
-                "$10::real[], $11::bytea, 'VALID', to_timestamp($12::bigint / 1000.0), 'live') "
-                "ON CONFLICT (exchange_id, instrument_id, timeframe, bar_open_time, "
-                "bar_revision, schema_hash) DO NOTHING",
-                static_cast<int>(env.exchange()), env.instrument_id(), tf_label,
-                fv.bar_open_time_ms(), fv.bar_revision(),
-                fv.feature_set_name(), fv.feature_set_version(),
-                resolved_schema_hash(fv.feature_set_name(), fv.feature_set_version(),
-                                     fv.schema_hash()),
-                fv.engine_version(), training::pg_float_array_literal(fv.values()),
-                training::pg_bytea_hex_literal(fv.validity_bitmap()), fv.computed_at_ms());
-        });
+        const auto schema = resolved_schema_hash(fv.feature_set_name(), fv.feature_set_version(), fv.schema_hash());
+        if (!schema) return std::unexpected(schema.error());
+        auto res = inference::archive_live_feature(pool_, env, fv, tf_label, *schema, original_payload,
+                                                   durable_received_at_ms);
         if (!res) {
             archive_failed_.fetch_add(1, std::memory_order_relaxed);
             log::warn("feature_vector_archive_failed", {{"message", res.error().message}});
+            return std::unexpected(res.error());
         }
+        return {};
     }
 
     // Pull upstream vectors AltTech still holds but this archive has not seen.
@@ -669,29 +705,35 @@ public:
     // stored the registry's value for the very same bar. Two rows, one bar, two
     // keys -- the archive would have carried both and nothing would have said so.
     //
-    // Resolved once per (set, version) and cached: an empty hash is filled from
-    // the registry, a present one is trusted as-is.
-    std::string resolved_schema_hash(const std::string& set_name, int set_version,
+    // Resolve against the frozen owner's dictionary even when the wire carries
+    // a hash. Otherwise a wrong-hash vector could enter an aligned source by
+    // matching only its name/version, despite its claimed incompatible schema.
+    Result<std::string> resolved_schema_hash(const std::string& set_name, int set_version,
                                      const std::string& wire_hash) {
-        if (!wire_hash.empty()) return wire_hash;
+        const auto verify = [&](const std::string& registered) -> Result<std::string> {
+            if (!wire_hash.empty() && wire_hash != registered)
+                return fail(ErrorCode::validation_error, "source_schema_hash_mismatch");
+            return registered;
+        };
         const std::string key = set_name + ":" + std::to_string(set_version);
         {
             std::lock_guard lock(hash_mu_);
             const auto it = schema_hash_cache_.find(key);
-            if (it != schema_hash_cache_.end()) return it->second;
+            if (it != schema_hash_cache_.end()) return verify(it->second);
         }
         std::string resolved;
         auto res = pool_.with_txn([&](pqxx::work& txn) {
             const auto rows = txn.exec_params(
                 "SELECT schema_hash FROM altml.fdw_feature_set_versions "
-                "WHERE name = $1 AND version = $2",
+                "WHERE name = $1 AND version = $2 AND frozen",
                 set_name, set_version);
             if (!rows.empty()) resolved = rows[0][0].as<std::string>();
         });
-        if (!res) return wire_hash;  // unresolvable: store what arrived, never invent
+        if (!res) return std::unexpected(res.error());
+        if (resolved.empty()) return fail(ErrorCode::not_found, "source_schema_unavailable", true);
         std::lock_guard lock(hash_mu_);
         schema_hash_cache_[key] = resolved;
-        return resolved;
+        return verify(resolved);
     }
 
     // Cross-venue consensus history. The live path gets these from NATS, but the
@@ -883,7 +925,7 @@ public:
     // models take different columns from it, and talib-core sources also feed
     // the derived block, which needs inputs the projection does not keep.
     void remember_aligned(const altml::v1::Envelope& env, const altml::v1::FeatureVectorV1& fv,
-                          const std::string& tf_label) {
+                          const std::string& tf_label, int64_t received_at_ms) {
         std::lock_guard lock(mu_);
         if (models_.empty()) return;
         // Deliberately NOT filtered on engine_version: each set is produced by
@@ -907,6 +949,10 @@ public:
         AlignedObservation obs;
         obs.bar_open_ms = fv.bar_open_time_ms();
         obs.feature_set_version = fv.feature_set_version();
+        obs.bar_revision = fv.bar_revision();
+        obs.computed_at_ms = fv.computed_at_ms();
+        obs.received_at_ms = received_at_ms;
+        obs.engine_version = fv.engine_version();
         obs.values.resize(static_cast<size_t>(fv.values_size()));
         const std::string& bmp = fv.validity_bitmap();
         for (int i = 0; i < fv.values_size(); ++i) {
@@ -916,12 +962,12 @@ public:
             obs.values[u] = valid ? fv.values(i) : std::numeric_limits<float>::quiet_NaN();
         }
         auto& hist = aligned_cache_[AlignedKey{venue, env.instrument_id(), tf_label, fv.feature_set_name()}];
-        inference::record_in_bar_order(hist, std::move(obs), kAlignedHistory);
+        inference::record_aligned_revision(hist, std::move(obs), history_limit(tf_label));
     }
 
     // The execution venue's observed book spread, kept for the decision cost.
     void remember_spread(const altml::v1::Envelope& env, const altml::v1::FeatureVectorV1& fv,
-                         const std::string& tf_label) {
+                         const std::string& tf_label, int64_t received_at_ms) {
         if (env.exchange() != altml::v1::EXCHANGE_BITGET || tf_label != "1m" ||
             fv.feature_set_name() != "bitget_micro") {
             return;
@@ -934,51 +980,80 @@ public:
         const bool valid = p < static_cast<size_t>(fv.values_size()) && (p / 8) < bmp.size() &&
                            (((static_cast<uint8_t>(bmp[p / 8]) >> (p % 8)) & 1U) != 0U);
         if (!valid) return;
-        auto& slot = spread_[env.instrument_id()];
-        if (fv.bar_open_time_ms() >= slot.first) slot = {fv.bar_open_time_ms(), fv.values(static_cast<int>(p))};
+        if (!std::isfinite(fv.values(static_cast<int>(p)))) return;
+        inference::record_aligned_revision(spread_[env.instrument_id()],
+            AlignedObservation{fv.bar_open_time_ms(), fv.feature_set_version(),
+                {fv.values(static_cast<int>(p))}, fv.bar_revision(), fv.computed_at_ms(), received_at_ms},
+            kAlignedHistory);
     }
 
     // The spread the book showed at T0 (the latest window at or before the
     // target bar, at most five minutes old), or NaN: the cost model then uses
     // its stated fallback and the estimate says so. Caller holds mu_.
-    double spread_at(int64_t instrument_id, int64_t bar_open_ms) const {
+    double spread_at(int64_t instrument_id, int64_t bar_open_ms, int64_t received_at_ms) const {
         const auto it = spread_.find(instrument_id);
         if (it == spread_.end()) return std::nan("");
-        const int64_t age = bar_open_ms - it->second.first;
-        if (age < 0 || age > 5 * 60'000) return std::nan("");
-        return it->second.second;
+        for (auto obs = it->second.rbegin(); obs != it->second.rend(); ++obs) {
+            const int64_t age = bar_open_ms - obs->bar_open_ms;
+            if (age < 0 || age > 5 * 60'000 || obs->received_at_ms <= 0 ||
+                obs->received_at_ms > received_at_ms || obs->values.empty()) continue;
+            return obs->values.front();
+        }
+        return std::nan("");
     }
 
     // The newest observation of `src` a live system has at T0. Caller holds mu_.
-    const AlignedObservation* latest_aligned(const training::AlignedSource& src,
-                                             int64_t instrument_id, int64_t t0_ms) const {
+    const AlignedObservation* latest_aligned(const EconModel::Source& source,
+        int64_t instrument_id, int64_t t0_ms, int64_t computed_at_ms, int64_t received_at_ms) const {
+        const auto& src = source.src;
         const int64_t keyed = src.pinned_instrument_id.value_or(instrument_id);
         const auto it = aligned_cache_.find(AlignedKey{src.exchange_id, keyed, src.timeframe, src.feature_set});
         if (it == aligned_cache_.end()) return nullptr;
         for (auto obs = it->second.rbegin(); obs != it->second.rend(); ++obs) {
             const auto& ev = src.equivalent_versions;
             if (std::find(ev.begin(), ev.end(), obs->feature_set_version) == ev.end()) continue;
-            if (training::aligned_observation_usable(src, obs->bar_open_ms, t0_ms)) return &*obs;
+            if (obs->values.size() != source.published_width) continue;
+            if (!src.engine_version.empty() && obs->engine_version != src.engine_version) continue;
+            if (training::aligned_observation_usable_pit(src, obs->bar_open_ms,
+                    obs->computed_at_ms, obs->received_at_ms, t0_ms, computed_at_ms, received_at_ms)) return &*obs;
         }
         return nullptr;
     }
 
-    Result<bool> on_feature_vector(const altml::v1::Envelope& env) {
+    Result<bool> on_feature_vector(const altml::v1::Envelope& env, std::string_view original_payload) {
         const auto& fv = env.feature_vector();
         const int64_t now = timeutil::now_ms();
+        int64_t received_at_ms = 0;
 
         // ARCHIVE PATH -- every venue, every grid, every feature set, recorded
         // with its own provenance. What a model may READ is decided below.
         const auto tf = timeframe_label(fv.timeframe());
+        // Fast data is archived only for explicitly configured training sources
+        // or loaded recipes. The producer owns continuous raw history; this
+        // bounded consumer must not turn an unselected1s stream into45days of
+        // extra rows for every venue/instrument.
+        if (tf && tf->ends_with('s')) {
+            std::lock_guard lock(mu_);
+            bool selected = fast_capture_sources_.contains(
+                std::tuple{static_cast<int>(env.exchange()), *tf, fv.feature_set_name()});
+            for (const auto& [_, model] : models_) {
+                for (const auto& source : model->sources) {
+                    selected = selected || (source.src.exchange_id == static_cast<int>(env.exchange()) &&
+                        source.src.timeframe == *tf && source.src.feature_set == fv.feature_set_name());
+                }
+            }
+            if (!selected) return false;
+        }
         // Counted, not just skipped: a vector that decodes but is not VALID
         // leaves no other trace.
         if (tf && fv.status() != altml::v1::FEATURE_STATUS_VALID) {
             not_valid_skipped_.fetch_add(1, std::memory_order_relaxed);
         }
         if (tf && fv.status() == altml::v1::FEATURE_STATUS_VALID) {
-            archive_feature_vector(env, fv, *tf);
-            remember_aligned(env, fv, *tf);
-            remember_spread(env, fv, *tf);
+            auto archived = archive_feature_vector(env, fv, *tf, original_payload, &received_at_ms);
+            if (!archived) return std::unexpected(archived.error());
+            remember_aligned(env, fv, *tf, received_at_ms);
+            remember_spread(env, fv, *tf, received_at_ms);
         }
 
         // MODEL-INPUT PATH -- the target is a Bitget instrument on the 1m grid.
@@ -1018,7 +1093,8 @@ public:
             for (const float v : derived) x.push_back(static_cast<double>(v));
             int missing = 0;
             for (const auto& s : m.sources) {
-                const auto* obs = latest_aligned(s.src, env.instrument_id(), t0_ms);
+                const auto* obs = latest_aligned(s, env.instrument_id(), t0_ms,
+                                                 fv.computed_at_ms(), received_at_ms);
                 const size_t width = s.src.positions.size() + (s.derived ? derived.size() : 0);
                 if (obs == nullptr) {
                     ++missing;
@@ -1050,7 +1126,7 @@ public:
                             std::string("LightGBM prediction failed: ") + LGBM_GetLastError(), true);
             }
             const auto p = econ::softmax3(raw, m.temperature);
-            const auto cost = m.cost_model.at(spread_at(env.instrument_id(), fv.bar_open_time_ms()));
+            const auto cost = m.cost_model.at(spread_at(env.instrument_id(), fv.bar_open_time_ms(), received_at_ms));
             const auto est = econ::estimate(p, m.means, cost.fraction());
             // Expected excursions (bps, >= 0): the regressions when the model
             // serves them, else the class means.
@@ -1135,7 +1211,7 @@ public:
             pr->set_horizon_minutes(m.horizon_minutes);
             pr->set_objective(m.objective);
             pr->set_calibrator(econ::kCalibratorVersion);
-            pr->set_recipe_version(recipe::kRecipeVersion);
+            pr->set_recipe_version(m.recipe_version);
             pr->set_aligned_missing(missing);
             pr->set_confidence(std::abs(est.p_long - est.p_short));
             // SHADOW outranks everything: a shadow estimate is never actionable,
@@ -1181,7 +1257,7 @@ public:
                 instrument_id, fv.bar_open_time_ms(), fv.bar_revision(), m.model_id, m.objective,
                 m.horizon_minutes, e.p_short, e.p_neutral, e.p_long, e.expected_return,
                 e.expected_net_long * 10'000.0, e.expected_net_short * 10'000.0, cost.bps(),
-                std::string(econ::kCalibratorVersion), std::string(recipe::kRecipeVersion), missing,
+                std::string(econ::kCalibratorVersion), m.recipe_version, missing,
                 std::string(m.shadow ? "SHADOW" : "ACTIVE"), std::string(econ::kCostModelVersion),
                 cost.spread_bps, cost.spread_observed, m.margin_bps,
                 e.expected_mfe_long * 10'000.0, e.expected_mae_long * 10'000.0, up_bps, down_bps,
@@ -1234,9 +1310,10 @@ private:
     std::map<std::string, std::unique_ptr<EconModel>> models_;
 
     std::map<AlignedKey, std::deque<AlignedObservation>> aligned_cache_;
+    std::set<std::tuple<int, std::string, std::string>> fast_capture_sources_;
     // The latest Bitget book spread per instrument (bitget_micro, 1m window):
     // bar open time and value in bps. Guarded by mu_.
-    std::map<int64_t, std::pair<int64_t, double>> spread_;
+    std::map<int64_t, std::deque<AlignedObservation>> spread_;
     std::map<int, size_t> spread_pos_;   // bitget_micro version -> position
 
     std::atomic<int64_t> stale_dropped_{0};
@@ -1300,7 +1377,8 @@ Result<void> InferenceComponent::init() {
     // model of an objective with no ACTIVE one, marked SHADOW (see EconModel).
     const bool serve_shadow = config::opt_bool(section, "serve_shadow_models", true);
     impl_->service.emplace(*impl_->pool, nats_, stale_after_sec, model_root,
-                           rt_.project.prediction_subject_prefix, serve_shadow);
+                           rt_.project.prediction_subject_prefix, serve_shadow,
+                           config::opt_str_list(rt_.root["training"], "econ_sources"));
     impl_->service->refresh_model();
 
     auto consumer = nats_.pull_consumer(rt_.project.input_stream, rt_.project.durable);
@@ -1384,8 +1462,14 @@ void InferenceComponent::run() {
                 }
                 continue;
             }
-            auto handled = service.on_feature_vector(env);
+            auto handled = service.on_feature_vector(env, raw);
             if (!handled) {
+                if (handled.error().code == ErrorCode::validation_error && !handled.error().retryable) {
+                    log::warn("inference_source_refused", {{"message", handled.error().message}});
+                    if (auto terminated = msg.term(); !terminated)
+                        log::warn("inference_term_failed", {{"message", terminated.error().message}});
+                    continue;
+                }
                 log::warn("inference_message_retry",
                           {{"symbol", env.exchange_symbol()},
                            {"message", handled.error().message}});

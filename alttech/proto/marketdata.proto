@@ -4,6 +4,25 @@ package alttech.v1;
 
 import "common.proto";
 
+// Additive consumer mirror of AltSpotter's validated raw book delta (tag 37).
+message BookLevel {
+    Decimal price = 1;
+    Decimal size = 2;
+}
+message OrderBookDelta {
+    repeated BookLevel bids = 1;
+    repeated BookLevel asks = 2;
+    int64 first_update_id = 3;
+    int64 sequence = 4;
+    int64 previous_sequence = 5;
+    int64 exchange_time_ms = 6;
+    sint64 checksum = 7;
+    optional Decimal ofi_base = 8;
+    uint64 book_epoch = 9;
+    uint64 delta_counter = 10;
+    optional Decimal bbo_depth_base = 11;
+}
+
 // ---------------------------------------------------------------------------
 // Global observation universe input (four-venue intersection).
 //

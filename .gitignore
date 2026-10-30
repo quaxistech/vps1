@@ -22,3 +22,6 @@
 **/*.log
 **/*.tmp
 **/__pycache__/
+
+# Local audit files
+**/audit.md

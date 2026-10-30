@@ -18,14 +18,20 @@ struct IntradayPoint {
     // stretch is an artefact of the carry-forward, not a move, and the
     // computation below refuses to publish one.
     bool traded = false;
+    int64_t known_at_ms = 0; // actual max receipt/update of both quote sides
 };
 
-// One observation of a daily series. `observation_start_ms` is the UTC start of
-// the day the figure describes; availability is derived from it by the lag
-// model, never from ingest time.
+// One immutable daily revision. Observation identifies the described period;
+// known_at identifies when this exact revision became available to its owner.
 struct DailyPoint {
     int64_t observation_start_ms = 0;
     double value = 0.0;
+    // Real owner availability of this exact revision. Zero is reserved for
+    // legacy explicitly constructed fixtures; runtime loaders always supply it.
+    int64_t known_at_ms = 0;
+    int64_t revision = 0;
+    bool valid = true;
+    int64_t version_at_ms = 0; // source vintage/revision order, distinct from receipt
 };
 
 // Everything the macro block reads, already fetched and sorted ascending.

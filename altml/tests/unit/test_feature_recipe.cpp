@@ -118,7 +118,75 @@ TEST_CASE("the training join admits only what had been computed by T0", "[recipe
     CHECK(sql.find("s3_i.bar_open_time <= f.bar_open_time + interval '1 minute' - interval '15 minutes'") !=
           std::string::npos);
     CHECK(sql.find("s3_i.computed_at <= f.computed_at") != std::string::npos);
+    CHECK(sql.find("s3_i.received_at <= f.received_at") != std::string::npos);
+    CHECK(sql.find("altml.econ_feature_vectors") != std::string::npos);
     // The bitmap travels with the values, so an invalid slot can become NaN.
     CHECK(sql.find("validity_bitmap AS bmp") != std::string::npos);
     CHECK(sql.find("quality_status = 'VALID'") != std::string::npos);
+}
+
+TEST_CASE("aligned dependencies obey independent computation and receipt cutoffs", "[recipe][pit]") {
+    const auto src = training::parse_aligned_source("1:1m:5:bitget_micro:1", 0);
+    REQUIRE(src);
+    constexpr int64_t t0 = 600'000;
+    const auto usable = [&](int64_t computed, int64_t received) {
+        return training::aligned_observation_usable_pit(*src, 540'000, computed, received,
+                                                        t0, 601'000, 602'000);
+    };
+    CHECK(usable(600'500, 601'500));
+    CHECK(usable(601'000, 602'000));
+    CHECK_FALSE(usable(601'001, 601'500));
+    CHECK_FALSE(usable(600'500, 602'001));
+    CHECK_FALSE(usable(0, 601'500));
+    CHECK_FALSE(usable(600'500, 0));
+    CHECK_FALSE(training::aligned_observation_usable_pit(*src, 600'000,
+        600'500, 601'500, t0, 601'000, 602'000)); // source bar is still open
+}
+
+TEST_CASE("recipe versions have unique ordered columns and retain valid no-pattern zero", "[recipe][cdl]") {
+    const auto legacy = recipe::projection_for(recipe::kRecipeVersion);
+    const auto expanded = recipe::projection_for(recipe::kRecipeVersion2);
+    CHECK(legacy == recipe::talib_projection());
+    REQUIRE(expanded.size() > legacy.size());
+    CHECK(std::equal(legacy.begin(), legacy.end(), expanded.begin()));
+    CHECK(std::set<std::string>(expanded.begin(), expanded.end()).size() == expanded.size());
+    CHECK(recipe::candlestick_projection().size() == 61);
+    for (const auto& name : recipe::candlestick_projection()) {
+        CHECK(std::count(expanded.begin(), expanded.end(), name) == 1);
+    }
+    CHECK(recipe::projection_for("unknown-recipe").empty());
+}
+
+TEST_CASE("fast windows preserve duration and refuse untyped or malformed source identities", "[recipe][fast]") {
+    const auto source = training::parse_aligned_source("2:5s:1:book_ofi_receipt:1", 0);
+    REQUIRE(source);
+    CHECK(training::source_span_ms(*source) == 5'000);
+    CHECK(training::aligned_source_spec(*source) == "2:5s:1:book_ofi_receipt:1");
+    const auto sql = training::aligned_source_sql_pit(*source);
+    CHECK(sql.find("interval '5000 milliseconds'") != std::string::npos);
+    CHECK(training::aligned_observation_usable(*source, 595'000, 600'000));
+    CHECK_FALSE(training::aligned_observation_usable(*source, 596'000, 600'000));
+    for (const auto* invalid : {"2:5s:1", "1:5s:1:book_ofi_receipt:1", "2:5s:1:book_ofi_receipt:2",
+            "2:5s:1:book_ofi_receipt:1garbage", "2:5s:1:book_ofi_receipt:1:0:trailing",
+            "2:1m:1:bad'set:1", "2:1m:1:reference_lite:1;SELECT", "2:1m:1x"}) {
+        CHECK_FALSE(training::parse_aligned_source(invalid, 0));
+    }
+    CHECK(recipe::is_excluded("book_ofi_receipt", "ofi_base"));
+    CHECK_FALSE(recipe::is_excluded("book_ofi_receipt", "ofi_depth_normalized"));
+    CHECK(recipe::is_excluded("book_ofi_receipt", "ofi_mean_depth_base"));
+    CHECK(recipe::source_layout_compatible("book_ofi_receipt", 1,
+        {"ofi_base", "ofi_depth_normalized", "ofi_event_count", "ofi_mean_depth_base"}));
+    CHECK_FALSE(recipe::source_layout_compatible("book_ofi_receipt", 1,
+        {"ofi_depth_normalized", "ofi_base", "ofi_event_count", "ofi_mean_depth_base"}));
+    const auto macro = training::parse_aligned_source("0:1m:5:macro-core:1:0:mc-1.4.0", 0);
+    REQUIRE(macro);
+    CHECK(macro->engine_version == "mc-1.4.0");
+    CHECK(training::aligned_source_spec(*macro) == "0:1m:5:macro-core:1:0:mc-1.4.0");
+    CHECK(training::aligned_source_sql_pit(*macro).find("engine_version = 'mc-1.4.0'") != std::string::npos);
+    CHECK_FALSE(training::parse_aligned_source("0:1m:5:macro-core:1:0:bad'engine", 0));
+    CHECK_FALSE(recipe::source_method_compatible(recipe::kRecipeVersion2, "macro-core", ""));
+    CHECK_FALSE(recipe::source_method_compatible(recipe::kRecipeVersion2, "macro-core", "mc-1.3.0"));
+    CHECK(recipe::source_method_compatible(recipe::kRecipeVersion2, "macro-core", "mc-1.4.0"));
+    CHECK(recipe::source_method_compatible(recipe::kRecipeVersion, "macro-core", ""));
+    CHECK_FALSE(recipe::source_method_compatible(recipe::kRecipeVersion2, "unknown-family", "unknown-engine"));
 }

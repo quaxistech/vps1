@@ -61,6 +61,10 @@ struct TrainerConfig {
     // multiclass LightGBM per horizon); "legacy" the retired direction_15m
     // binary. The decision layer serves econ models only.
     std::string mode = "econ";
+    // DT-02/DT-04: the recipe a NEW model is trained on (recipe-1 or recipe-2);
+    // recorded with it, and inference serves it that projection. recipe-1 is
+    // the deployed contract until a recipe-2 pair passes its gates.
+    std::string recipe_version = recipe::kRecipeVersion;
     std::vector<std::string> econ_horizons = {"15m", "1h", "4h"};
     // The aligned sources an econ model reads. Same spec grammar as
     // t0_sources; the column choice inside each set is the recipe's
@@ -235,6 +239,11 @@ Result<TrainerConfig> load_trainer_config(const YAML::Node& root) {
     c.mode = config::opt_str(n, "mode", c.mode);
     if (const auto hz = config::opt_str_list(n, "econ_horizons"); !hz.empty()) c.econ_horizons = hz;
     if (const auto src = config::opt_str_list(n, "econ_sources"); !src.empty()) c.econ_sources = src;
+    if (const auto rv = config::opt_str(n, "recipe_version", c.recipe_version); !recipe::projection_for(rv).empty()) {
+        c.recipe_version = rv;
+    } else {
+        return fail(ErrorCode::config_error, "training.recipe_version is not a recipe this build knows: " + rv);
+    }
     c.econ_min_holdout_t = config::opt_double(n, "econ_min_holdout_t", c.econ_min_holdout_t);
     c.econ_time_budget_sec = config::opt_int(n, "econ_time_budget_sec", c.econ_time_budget_sec);
     c.econ_impact_bps_per_side =
@@ -1839,15 +1848,13 @@ std::string spread_lateral_sql(const std::map<int, int>& spread_pos) {
         }
         spread_case += " END";
     }
-    return "LEFT JOIN LATERAL (SELECT " + spread_case + " AS spread FROM altml.feature_vectors cs_i "
+    return "LEFT JOIN LATERAL (SELECT " + spread_case + " AS spread FROM altml.econ_feature_vectors cs_i "
            "WHERE cs_i.exchange_id = f.exchange_id AND cs_i.instrument_id = f.instrument_id "
            "AND cs_i.timeframe = '1m' AND cs_i.feature_set_name = 'bitget_micro' "
            "AND cs_i.quality_status = 'VALID' AND cs_i.bar_open_time <= f.bar_open_time "
            "AND cs_i.bar_open_time >= f.bar_open_time - interval '5 minutes' "
-           "AND CASE WHEN f.ingest_path = 'live' AND cs_i.ingest_path = 'live' "
-           "         THEN cs_i.received_at <= f.received_at "
-           "         ELSE cs_i.computed_at <= f.computed_at END "
-           "ORDER BY cs_i.bar_open_time DESC, cs_i.computed_at DESC LIMIT 1) cs ON true ";
+           "AND cs_i.received_at <= f.received_at "
+           "ORDER BY cs_i.bar_open_time DESC, cs_i.computed_at DESC, cs_i.bar_revision DESC LIMIT 1) cs ON true ";
 }
 
 Result<EconData> load_econ_data(persistence::PgPool& pool, const TrainerConfig& cfg,
@@ -1892,7 +1899,7 @@ Result<EconData> load_econ_data(persistence::PgPool& pool, const TrainerConfig& 
     // Base: the scale-free projection of the target's own vector plus the
     // derived block computed from its full vector.
     std::vector<size_t> base_pos;
-    for (const auto& name : recipe::talib_projection()) {
+    for (const auto& name : recipe::projection_for(cfg.recipe_version)) {
         const auto it = std::find(core_layout.begin(), core_layout.end(), name);
         if (it == core_layout.end()) {
             return fail(ErrorCode::validation_error, "talib-core lacks projected column " + name);
@@ -1912,6 +1919,8 @@ Result<EconData> load_econ_data(persistence::PgPool& pool, const TrainerConfig& 
         if (!parsed) return fail(ErrorCode::validation_error, "unusable econ source: " + spec);
         EconSource es;
         es.src = *parsed;
+        if (!recipe::source_method_compatible(cfg.recipe_version, es.src.feature_set, es.src.engine_version))
+            return fail(ErrorCode::validation_error, "source method unpinned or incompatible: " + spec);
         std::vector<std::string> layout;
         if (es.src.feature_set == analytics::kCoreFeatureSetName) {
             if (es.src.feature_set_version != analytics::kCoreFeatureSetVersion) {
@@ -1919,7 +1928,7 @@ Result<EconData> load_econ_data(persistence::PgPool& pool, const TrainerConfig& 
             }
             layout = core_layout;
             es.src.equivalent_versions = {analytics::kCoreFeatureSetVersion};
-            for (const auto& name : recipe::talib_projection()) {
+            for (const auto& name : recipe::projection_for(cfg.recipe_version)) {
                 const auto it = std::find(layout.begin(), layout.end(), name);
                 es.src.projection.push_back(name);
                 es.src.positions.push_back(static_cast<size_t>(it - layout.begin()));
@@ -1931,6 +1940,8 @@ Result<EconData> load_econ_data(persistence::PgPool& pool, const TrainerConfig& 
             auto loaded = load_set_layout(pool, es.src.feature_set, es.src.feature_set_version);
             if (!loaded) return std::unexpected(loaded.error());
             layout = std::move(loaded->columns);
+            if (!recipe::source_layout_compatible(es.src.feature_set, es.src.feature_set_version, layout))
+                return fail(ErrorCode::validation_error, "unsupported econ source layout: " + spec);
             es.src.equivalent_versions = std::move(loaded->equivalent_versions);
             for (size_t i = 0; i < layout.size(); ++i) {
                 if (recipe::is_excluded(es.src.feature_set, layout[i])) continue;
@@ -1941,6 +1952,7 @@ Result<EconData> load_econ_data(persistence::PgPool& pool, const TrainerConfig& 
         if (es.src.projection.empty()) {
             return fail(ErrorCode::validation_error, "econ source contributes nothing: " + spec);
         }
+        es.src.published_width = layout.size();
         recipe::append_source_names(
             recipe::source_prefix(es.src.exchange_id, es.src.timeframe, es.src.feature_set),
             es.src.projection, es.derived, data.feature_names);
@@ -1982,7 +1994,7 @@ Result<EconData> load_econ_data(persistence::PgPool& pool, const TrainerConfig& 
         "AND f.bar_open_time < to_timestamp($6::bigint / 1000.0) "
         "AND mod(floor(extract(epoch FROM f.bar_open_time) / 60)::bigint, $7) = 0 ";
     const std::string from =
-        " FROM altml.feature_vectors f "
+        " FROM altml.econ_feature_vectors f "
         "JOIN altml.labels l ON l.exchange_id = f.exchange_id "
         " AND l.instrument_id = f.instrument_id AND l.timeframe = f.timeframe "
         " AND l.bar_open_time = f.bar_open_time AND l.bar_revision = f.bar_revision " +
@@ -2865,7 +2877,7 @@ Result<CycleOutcome> run_econ_horizon(persistence::PgPool& pool, const config::R
         {"rows", rows.size()},
         {"features", d.n_features},
         {"sample_every_minutes", d.sample_minutes},
-        {"recipe_version", recipe::kRecipeVersion},
+        {"recipe_version", cfg.recipe_version},
         {"walk_forward", folds_json},
         {"holdout", slice_json(holdout.score)},
         {"holdout_from", d.t_ms[static_cast<size_t>(fte.front())]},
@@ -2961,7 +2973,7 @@ Result<CycleOutcome> run_econ_horizon(persistence::PgPool& pool, const config::R
                   {"gates", "market-1"},
                   {"magnitude_source", magnitude_source},
                   {"dataset_fingerprint", dataset_fingerprint},
-                  {"recipe_version", recipe::kRecipeVersion},
+                  {"recipe_version", cfg.recipe_version},
                   {"trainer_version", kEconTrainerVersion}})
                 .dump(),
             t_lo, t_hi, h_lo, h_hi, v_lo, v_hi);
@@ -3039,8 +3051,8 @@ Result<CycleOutcome> run_econ_horizon(persistence::PgPool& pool, const config::R
             std::string(analytics::kCoreFeatureSetName) + ":" + std::to_string(analytics::kCoreFeatureSetVersion),
             d.feature_schema_hash, d.n_features, d.base_width,
             training::pg_text_array_literal(d.source_specs),
-            training::pg_text_array_literal(recipe::talib_projection()),
-            std::string(recipe::kRecipeVersion), training::pg_text_array_literal(d.base_projection),
+            training::pg_text_array_literal(recipe::projection_for(cfg.recipe_version)),
+            cfg.recipe_version, training::pg_text_array_literal(d.base_projection),
             names_sha, calibration.dump());
         txn.exec_params("INSERT INTO altml.model_events (model_id, event, detail, actor) "
                         "VALUES ($1, 'trained', $2, 'altml-trainer')",
@@ -3554,7 +3566,7 @@ int run_prediction_replay(const config::RuntimeConfig& rt, const std::string& mo
     });
     if (!r) { std::fprintf(stderr, "registry read failed: %s\n", r.error().message.c_str()); return 1; }
     if (path.empty()) { std::fprintf(stderr, "no such model: %s\n", model_id.c_str()); return 2; }
-    if (recipe_version != recipe::kRecipeVersion) { std::fprintf(stderr, "not an econ model\n"); return 2; }
+    if (recipe::projection_for(recipe_version).empty()) { std::fprintf(stderr, "not an econ model\n"); return 2; }
     {
         // Registry paths are data, not authority -- the same rule inference
         // applies: the artifact must resolve inside the configured model root.
@@ -3589,10 +3601,15 @@ int run_prediction_replay(const config::RuntimeConfig& rt, const std::string& mo
         if (!parsed) { std::fprintf(stderr, "bad source %s\n", specs[i].c_str()); return 1; }
         EconSource es;
         es.src = *parsed;
+        if (!recipe::source_method_compatible(recipe_version, es.src.feature_set, es.src.engine_version)) {
+            std::fprintf(stderr, "source method unpinned or incompatible\n"); return 1;
+        }
         if (es.src.feature_set == analytics::kCoreFeatureSetName) {
             es.src.equivalent_versions = {analytics::kCoreFeatureSetVersion};
-            for (const auto& n : recipe::talib_projection()) {
+            es.src.published_width = core_layout.size();
+            for (const auto& n : recipe::projection_for(recipe_version)) {
                 const auto it = std::find(core_layout.begin(), core_layout.end(), n);
+                if (it == core_layout.end()) { std::fprintf(stderr, "source column missing: %s\n", n.c_str()); return 1; }
                 es.src.projection.push_back(n);
                 es.src.positions.push_back(static_cast<size_t>(it - core_layout.begin()));
             }
@@ -3601,7 +3618,11 @@ int run_prediction_replay(const config::RuntimeConfig& rt, const std::string& mo
         } else {
             auto layout = load_set_layout(pool, es.src.feature_set, es.src.feature_set_version);
             if (!layout) { std::fprintf(stderr, "layout: %s\n", layout.error().message.c_str()); return 1; }
+            if (!recipe::source_layout_compatible(es.src.feature_set, es.src.feature_set_version, layout->columns)) {
+                std::fprintf(stderr, "unsupported source layout\n"); return 1;
+            }
             es.src.equivalent_versions = layout->equivalent_versions;
+            es.src.published_width = layout->columns.size();
             for (size_t k = 0; k < layout->columns.size(); ++k) {
                 if (recipe::is_excluded(es.src.feature_set, layout->columns[k])) continue;
                 es.src.projection.push_back(layout->columns[k]);
@@ -3665,7 +3686,7 @@ int run_prediction_replay(const config::RuntimeConfig& rt, const std::string& mo
         joins += training::aligned_source_sql_pit(es.src);
     }
     const std::string input_sql =
-        cols + " FROM altml.feature_vectors f " + joins +
+        cols + " FROM altml.econ_feature_vectors f " + joins +
         "WHERE f.exchange_id = 1 AND f.instrument_id = $1 AND f.timeframe = '1m' "
         "AND f.bar_open_time = to_timestamp($2::bigint / 1000.0) AND f.bar_revision = $3 "
         "AND f.schema_hash = $4 AND f.feature_set_name = 'talib-core' "

@@ -4,6 +4,7 @@
 #include "altmacro/core/time.hpp"
 
 #include <charconv>
+#include <chrono>
 #include <sstream>
 
 namespace altmacro::providers {
@@ -17,13 +18,16 @@ constexpr double kBurst = 2.0;
 
 std::optional<int64_t> iso_date_to_ms(const std::string& d) {
     if (d.size() != 10 || d[4] != '-' || d[7] != '-') return std::nullopt;
-    std::tm tm{};
-    tm.tm_year = std::atoi(d.substr(0, 4).c_str()) - 1900;
-    tm.tm_mon = std::atoi(d.substr(5, 2).c_str()) - 1;
-    tm.tm_mday = std::atoi(d.substr(8, 2).c_str());
-    const std::time_t t = timegm(&tm);
-    if (t == static_cast<std::time_t>(-1)) return std::nullopt;
-    return static_cast<int64_t>(t) * 1000;
+    int year = 0, month = 0, day = 0;
+    const auto parse = [&](size_t begin, size_t end, int& value) {
+        const auto result = std::from_chars(d.data() + begin, d.data() + end, value);
+        return result.ec == std::errc{} && result.ptr == d.data() + end;
+    };
+    if (!parse(0,4,year) || !parse(5,7,month) || !parse(8,10,day) || year < 1) return std::nullopt;
+    const std::chrono::year_month_day date{std::chrono::year{year},
+        std::chrono::month{static_cast<unsigned>(month)}, std::chrono::day{static_cast<unsigned>(day)}};
+    if (!date.ok()) return std::nullopt;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::sys_days{date}.time_since_epoch()).count();
 }
 
 std::string trim(std::string s) {
@@ -34,6 +38,14 @@ std::string trim(std::string s) {
 }
 
 } // namespace
+
+Result<int64_t> FredProvider::date_only_vintage_bound(const std::string& date) {
+    const auto midnight = iso_date_to_ms(date);
+    if (!midnight) return fail(ErrorCode::parse_error, "invalid vintage date: " + date);
+    // End of source's US Eastern calendar date, conservative in both EST/EDT.
+    // It may lag the summer bound by one hour; it never claims midnight known.
+    return *midnight + 29LL * 3'600'000;
+}
 
 FredProvider::FredProvider(bool vintage_capable)
     : vintage_capable_(vintage_capable),
@@ -236,6 +248,8 @@ FredProvider::fetch_vintage(const InstrumentDescriptor& instrument, const std::s
     if (!vintage_capable_) {
         return fail(ErrorCode::invalid_argument, "fred host does not serve vintages; use alfred");
     }
+    const auto publication_bound = date_only_vintage_bound(vintage_date);
+    if (!publication_bound) return std::unexpected(publication_bound.error());
     auto res = fetch("/graph/alfredgraph.csv?id=" + instrument.native_symbol +
                          "&vintage_date=" + vintage_date,
                      should_stop);
@@ -267,9 +281,13 @@ FredProvider::fetch_vintage(const InstrumentDescriptor& instrument, const std::s
         ReleaseObservation o;
         o.observation_time_ms = *ms;
         o.vintage_date = vintage_date;
-        // The vintage date IS the availability bound: this is the series as the
-        // archive knew it on that date, so nothing in it was unknown then.
-        o.publication_time_ms = iso_date_to_ms(vintage_date);
+        // EX-16 (2026-10-30): a vintage date has no time of day. The series
+        // "as the archive knew it on that date" includes a release made at
+        // any hour of that US calendar day; its midnight would claim the
+        // value known up to a day early. The bound is therefore the END of
+        // that day in US Eastern time, in UTC: the date's midnight + 29 h
+        // (24 h + the 5 h of EST, the later of the two offsets). Never earlier.
+        o.publication_time_ms = *publication_bound;
         if (p.value.has_value()) {
             o.value = *p.value;
             o.quality = domain::QualityStatus::valid;

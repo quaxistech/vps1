@@ -66,6 +66,8 @@ struct EvaluationRow {
     // The candidate's original wire bytes; carried only for an accepted signal
     // that has not been published yet.
     std::string candidate_payload;
+    std::string publication_payload;
+    std::string candidate_sha256;
 };
 
 // What an already-stored evaluation looks like when a duplicate arrives.
@@ -75,6 +77,16 @@ struct ExistingEvaluation {
     std::string final_signal_id;
     bool published = false;
     int64_t evaluated_at_ms = 0;
+    std::string candidate_payload;
+    std::string publication_payload;
+    std::string candidate_sha256;
+
+    ExistingEvaluation() = default;
+    explicit ExistingEvaluation(const EvaluationRow& row)
+        : evaluation_id(row.evaluation_id), decision(row.decision), final_signal_id(row.final_signal_id),
+          published(row.published), evaluated_at_ms(row.evaluated_at_ms),
+          candidate_payload(row.candidate_payload), publication_payload(row.publication_payload),
+          candidate_sha256(row.candidate_sha256) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -236,6 +248,8 @@ public:
     // idempotency claim, taken BEFORE the final signal is published.
     [[nodiscard]] Result<std::optional<ExistingEvaluation>> claim_evaluation(
         const EvaluationRow& row);
+    [[nodiscard]] Result<std::optional<ExistingEvaluation>> find_evaluation(
+        const std::string& signal_proposal_id);
 
     [[nodiscard]] Result<void> mark_published(const std::string& signal_proposal_id,
                                               int64_t published_at_ms);

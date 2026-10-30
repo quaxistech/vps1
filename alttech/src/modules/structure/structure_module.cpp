@@ -6,8 +6,8 @@
 //
 //   * swing pivots (fractals, wing 2) over a 500-bar window;
 //   * one-dimensional clustering of pivot prices at ATR-scaled distance;
-//   * volume profile POC / value-area high and low, computed from the typical
-//     price of each bar because tick-level history is not retained;
+//   * POC / value-area profile from exact-total coverage-qualified real trades,
+//     otherwise an explicitly labelled candle typical-price approximation;
 //   * session (UTC day) and rolling VWAP;
 //   * previous day and week extremes, Donchian 20/55 bounds and the round-number
 //     grid nearest to price.
@@ -36,6 +36,7 @@
 #include "alttech/messaging/topology.hpp"
 #include "alttech/persistence/pg.hpp"
 #include "alttech/persistence/txn_log.hpp"
+#include "volume_profile.hpp"
 #include "alttech/time/time.hpp"
 
 #include <algorithm>
@@ -58,7 +59,7 @@ using alttech::structure::zone_weight;
 
 
 constexpr std::string_view kModuleName = "structure";
-constexpr const char* kAlgoVersion = "venue-structure-1";
+constexpr const char* kAlgoVersion = "venue-structure-2";
 constexpr int kWindowBars = 500;
 constexpr int kPivotWing = 2;
 
@@ -218,12 +219,12 @@ private:
         const double half_width =
             std::max(atr * kBandAtrFraction, last_close * kBandMinPriceFraction);
 
-        auto candidates = build_candidates(bars, atr, half_width, last_close);
+        auto candidates = build_candidates(iid, bars, atr, half_width, last_close);
         const int active = reconcile_zones(iid, sym, tf, bars, candidates, atr, half_width);
         return active;
     }
 
-    std::vector<ZoneCandidate> build_candidates(const std::vector<SBar>& bars, double atr,
+    std::vector<ZoneCandidate> build_candidates(int64_t iid, const std::vector<SBar>& bars, double atr,
                                                 double half_width, double last_close) {
         std::vector<ZoneCandidate> out;
         // --- pivots (fractal wing=2) ---
@@ -276,43 +277,89 @@ private:
         if (hi > lo) {
             constexpr int kBins = 40;
             std::array<double, kBins> vol{};
+            double candle_quote = 0.0;
             for (const auto& b : bars) {
                 const double tp = (b.high + b.low + b.close) / 3.0;
                 int bin = static_cast<int>((tp - lo) / (hi - lo) * kBins);
                 bin = std::clamp(bin, 0, kBins - 1);
                 vol[bin] += b.quote;
+                candle_quote += b.quote;
             }
-            const auto poc_it = std::max_element(vol.begin(), vol.end());
-            const int poc = static_cast<int>(poc_it - vol.begin());
-            const double bin_w = (hi - lo) / kBins;
-            const double poc_price = lo + (poc + 0.5) * bin_w;
-            // Value area: expand around POC to 70% volume.
-            double total = 0;
-            for (const double v : vol) total += v;
-            double acc = vol[poc];
-            int a = poc, b2 = poc;
-            while (acc < 0.7 * total && (a > 0 || b2 < kBins - 1)) {
-                const double up = b2 < kBins - 1 ? vol[b2 + 1] : -1;
-                const double dn = a > 0 ? vol[a - 1] : -1;
-                if (up >= dn) {
-                    acc += vol[++b2];
-                } else {
-                    acc += vol[--a];
+            // The trade profile is admitted only when both exact base and
+            // quote totals match every closed venue minute in this window.
+            // A tolerance match cannot certify complete tape coverage.
+            bool trade_profile = false;
+            if (bars.size() > 1 && candle_quote > 0.0) {
+                const int64_t step = std::abs(bars[1].open_ms - bars[0].open_ms);
+                const int64_t from_ms = std::min(bars.front().open_ms, bars.back().open_ms);
+                const int64_t to_ms = std::max(bars.front().open_ms, bars.back().open_ms) + step;
+                std::array<double, kBins> traded{};
+                double traded_quote = 0.0;
+                double trade_low = lo, trade_high = hi;
+                bool covered = false;
+                const auto read = pool_.with_txn([&](pqxx::work& txn) {
+                    txn.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+                    const auto proof = txn.exec_params(
+                        "WITH candles AS (SELECT count(*) AS n,sum(base_volume) AS base,sum(quote_volume) AS quote,min(low) AS lo,max(high) AS hi "
+                        " FROM market_candles_1m WHERE exchange_id=1 AND instrument_id=$1 AND is_closed "
+                        " AND quality_status='ok' AND open_time>=to_timestamp($2::bigint/1000.0) "
+                        " AND open_time<to_timestamp($3::bigint/1000.0)), "
+                        "tape AS (SELECT sum(size) AS base,sum(price*size) AS quote,min(price) AS lo,max(price) AS hi FROM market_trades_raw "
+                        " WHERE exchange_id=1 AND instrument_id=$1 AND trade_time>=to_timestamp($2::bigint/1000.0) "
+                        " AND trade_time<to_timestamp($3::bigint/1000.0)) "
+                        "SELECT candles.n=($3::bigint-$2::bigint)/60000 AND candles.base>0 "
+                        " AND candles.base=tape.base AND candles.quote=tape.quote "
+                        " AND tape.lo>=candles.lo AND tape.hi<=candles.hi,candles.lo::text,candles.hi::text FROM candles,tape",
+                        iid, from_ms, to_ms);
+                    covered = !proof.empty() && !proof[0][0].is_null() && proof[0][0].as<bool>();
+                    if (!covered) return;
+                    const std::string exact_low = proof[0][1].as<std::string>();
+                    const std::string exact_high = proof[0][2].as<std::string>();
+                    trade_low = std::stod(exact_low);
+                    trade_high = std::stod(exact_high);
+                    if (!(trade_high > trade_low)) { covered = false; return; }
+                    const auto rows = txn.exec_params(
+                        "SELECT LEAST(GREATEST(width_bucket(price, $2::numeric, $3::numeric, $4) - 1, 0), $4 - 1),"
+                        " sum(price * size)::float8 FROM market_trades_raw"
+                        " WHERE exchange_id = 1 AND instrument_id = $1"
+                        " AND trade_time >= to_timestamp($5::float8 / 1000) AND trade_time < to_timestamp($6::float8 / 1000)"
+                        " GROUP BY 1",
+                        iid, exact_low, exact_high, kBins, from_ms, to_ms);
+                    for (const auto& r : rows) {
+                        const int bin = std::clamp(r[0].as<int>(), 0, kBins - 1);
+                        traded[static_cast<std::size_t>(bin)] += r[1].as<double>();
+                        traded_quote += r[1].as<double>();
+                    }
+                });
+                if (read && covered && traded_quote > 0) {
+                    vol = traded;
+                    lo = trade_low;
+                    hi = trade_high;
+                    trade_profile = true;
                 }
             }
-            const auto add_vp = [&](double price, const char* name, double weight) {
-                ZoneCandidate z;
-                z.center = price;
-                z.lower = price - half_width;
-                z.upper = price + half_width;
-                z.kind = price > last_close ? "resistance" : "support";
-                z.methods[name] = weight;
-                z.volume_weight = weight;
-                out.push_back(std::move(z));
-            };
-            add_vp(poc_price, "volume_profile_poc", 2.0);
-            add_vp(lo + (b2 + 1.0) * bin_w, "volume_profile_vah", 1.2);
-            add_vp(lo + a * bin_w, "volume_profile_val", 1.2);
+            const auto area = alttech::structure::profile_area(vol);
+            if (area) {
+                const int poc = static_cast<int>(area->poc);
+                const double bin_w = (hi - lo) / kBins;
+                const double poc_price = lo + (poc + 0.5) * bin_w;
+                const int a = static_cast<int>(area->low), b2 = static_cast<int>(area->high);
+                const auto add_vp = [&](double price, const char* name, double weight) {
+                    ZoneCandidate z;
+                    z.center = price;
+                    z.lower = price - half_width;
+                    z.upper = price + half_width;
+                    z.kind = price > last_close ? "resistance" : "support";
+                    // Kind qualifies the source method itself. A separate
+                    // numeric marker would incorrectly add confluence weight.
+                    z.methods[std::string(name) + (trade_profile ? ".TRADE_BASED" : ".CANDLE_TYPICAL_PRICE")] = weight;
+                    z.volume_weight = weight;
+                    out.push_back(std::move(z));
+                };
+                add_vp(poc_price, "volume_profile_poc", 2.0);
+                add_vp(lo + (b2 + 1.0) * bin_w, "volume_profile_vah", 1.2);
+                add_vp(lo + a * bin_w, "volume_profile_val", 1.2);
+            }
         }
         // --- VWAPs ---
         {

@@ -140,16 +140,16 @@ TEST_CASE("ranking prices the canonical round-trip cost, not a second formula") 
     ctx.expected_slippage_bps = 0.5 * ctx.spread_bps + 2.0;   // half spread + depth
     ctx.top_depth_usdt = 10'000;                              // too thin for a market entry
 
-    // A pullback-style candidate rests a limit order: maker entry, taker exit.
+    // A proposed limit has no post-only approval; reserve both taker legs.
     auto limit_cand = cand("trend_pullback", Family::trend, Side::long_, 0.5);
     limit_cand.global_regime = "TREND_UP";
     const auto ens = compute_ensemble({limit_cand});
     const auto comps = ranking_components(limit_cand, ctx, ens);
 
-    // Canonical: fees 2 + 6 = 8, spread 3 (exit only), depth impact 2 => 13 bps.
+    // Canonical: fees 6 + 6, spread 6, depth impact 2 => 20 bps.
     const TradeCost expected = compute_trade_cost(choose_entry(limit_cand, ctx), ctx);
-    CHECK(expected.round_trip_bps == Catch::Approx(13.0));
-    CHECK(comps.at("cost_penalty") == Catch::Approx(13.0 / 30.0));
+    CHECK(expected.round_trip_bps == Catch::Approx(20.0));
+    CHECK(comps.at("cost_penalty") == Catch::Approx(20.0 / 30.0));
     // The retired formula would have said 2*4 + 6 + 5 = 19 bps.
     CHECK(comps.at("cost_penalty") != Catch::Approx(19.0 / 30.0));
 }

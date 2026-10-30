@@ -3,6 +3,9 @@
 #include "reference_features.hpp"
 
 #include "alttech/persistence/sql_literal.hpp"
+#include "alttech/persistence/analytics_outbox.hpp"
+#include "alttech/messaging/codec.hpp"
+#include "alttech/messaging/topology.hpp"
 #include "alttech/time/time.hpp"
 
 #include <algorithm>
@@ -34,9 +37,10 @@ Result<int64_t> ensure_named_set(persistence::PgPool& pool, const std::string& n
     int64_t set_id = 0;
     auto res = pool.with_txn([&](pqxx::work& txn) {
         const auto rows = txn.exec_params(
-            "SELECT id FROM alttech.feature_set_versions WHERE name = $1 AND version = $2", name,
+            "SELECT id,schema_hash FROM alttech.feature_set_versions WHERE name = $1 AND version = $2", name,
             kReferenceSetVersion);
         if (!rows.empty()) {
+            if (rows[0][1].as<std::string>() != hash) throw std::runtime_error("frozen reference feature schema mismatch: " + name);
             set_id = rows[0][0].as<int64_t>();
             return;
         }
@@ -431,7 +435,8 @@ Result<void> write_venue_regime(persistence::PgPool& pool, const PairVenue& pv, 
 }
 
 Result<void> write_venue_micro(persistence::PgPool& pool, const PairVenue& pv, int64_t bar_ms,
-                               int64_t feature_set_id, const LiteContext& ctx, double close) {
+                               int64_t feature_set_id, const LiteContext& ctx, double close,
+                               std::vector<float>* out_values, std::vector<uint8_t>* out_validity) {
     std::vector<float> values(kMicroCount, 0.0F);
     std::vector<uint8_t> validity((kMicroCount + 7) / 8, 0);
     const auto set = [&](std::size_t i, std::optional<double> v) {
@@ -459,7 +464,7 @@ Result<void> write_venue_micro(persistence::PgPool& pool, const PairVenue& pv, i
     set(9, micro_rel);
     set(10, ctx.data_quality);
 
-    return pool.with_txn([&](pqxx::work& txn) {
+    auto written = pool.with_txn([&](pqxx::work& txn) {
         txn.exec("SET LOCAL TIME ZONE 'UTC'");
         std::string sql =
             "INSERT INTO alttech.venue_microstructure_vectors (part_class, exchange_id, "
@@ -479,7 +484,47 @@ Result<void> write_venue_micro(persistence::PgPool& pool, const PairVenue& pv, i
             "feature_set_version_id) DO UPDATE SET values = EXCLUDED.values, "
             "validity_bitmap = EXCLUDED.validity_bitmap, computed_at = now()";
         txn.exec(sql);
+        const auto manifest = txn.exec_params("SELECT version,schema_hash,engine_version FROM alttech.feature_set_versions WHERE id=$1", feature_set_id);
+        if (manifest.size() != 1) throw std::runtime_error("reference micro feature manifest is missing");
+        messaging::EnvelopeMeta meta;
+        meta.venue = pv.venue;
+        meta.event_type = "microfeature.venue";
+        meta.instrument_id = pv.canonical_pair_id;
+        meta.exchange_symbol = pv.exchange_symbol;
+        meta.exchange_timestamp_ms = bar_ms;
+        meta.source_service = "alttech-service";
+        meta.message_id = "vm:" + std::string(venue_code(pv.venue)) + ":" + pv.exchange_symbol +
+            ":1m:" + std::to_string(bar_ms) + ":set" + std::to_string(feature_set_id);
+        auto envelope = messaging::make_envelope(meta);
+        envelope.set_canonical_pair_id(pv.canonical_pair_id);
+        auto* payload = envelope.mutable_venue_microstructure_vector();
+        payload->set_scope(::alttech::v1::ANALYTICS_SCOPE_VENUE);
+        payload->set_exchange(envelope.exchange());
+        payload->set_canonical_pair_id(pv.canonical_pair_id);
+        payload->set_instrument_id(pv.canonical_pair_id);
+        payload->set_window_label("1m");
+        payload->set_window_start_ms(bar_ms);
+        payload->set_profile("reference_lite");
+        payload->set_feature_set_name(std::string(kReferenceMicroSetName));
+        payload->set_feature_set_version(manifest[0][0].as<int>());
+        payload->set_schema_hash(manifest[0][1].as<std::string>());
+        payload->set_engine_version(manifest[0][2].as<std::string>());
+        for (float value : values) payload->add_values(value);
+        payload->set_validity_bitmap(std::string(validity.begin(), validity.end()));
+        payload->set_status(::alttech::v1::ANALYTICS_VECTOR_STATUS_VALID);
+        payload->set_venue_quality(ctx.data_quality >= 1.0 ?
+            ::alttech::v1::QUALITY_STATE_VALID : ::alttech::v1::QUALITY_STATE_DEGRADED);
+        envelope.set_quality_state(payload->venue_quality());
+        payload->set_computed_at_ms(timeutil::now_ms());
+        persistence::enqueue_analytics(txn, envelope.message_id(),
+            messaging::topology::venue_microfeature_subject(pv.venue, pv.exchange_symbol, "1m"),
+            messaging::serialize(envelope));
     });
+    if (written) {
+        if (out_values != nullptr) *out_values = values;
+        if (out_validity != nullptr) *out_validity = validity;
+    }
+    return written;
 }
 
 Result<void> write_venue_zone(persistence::PgPool& pool, const PairVenue& pv,

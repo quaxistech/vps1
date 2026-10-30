@@ -102,7 +102,9 @@ TEST_CASE("okx prevSeqId chaining + crossed-book guard", "[book][okx]") {
     d.prev_sequence = 10;         // chains correctly
     d.asks = {lvl("101", "0")};   // remove the only ask
     d.bids = {lvl("102", "1")};   // new bid above nothing -> not crossed yet
-    CHECK(book.apply(d) == BookApplyResult::ok);
+    CHECK(book.apply(d) == BookApplyResult::empty);
+    CHECK_FALSE(book.synced());
+    book.apply(snapshot({lvl("100", "1")}, {lvl("101", "1")}, 11));
 
     BookUpdate gap;
     gap.sequence = 20;
@@ -131,4 +133,83 @@ TEST_CASE("crossed book is not published as valid", "[book]") {
     d.bids = {lvl("102", "1")};  // bid now above ask -> crossed
     CHECK(book.apply(d) == BookApplyResult::crossed);
     CHECK(book.crossed());
+    CHECK_FALSE(book.synced());
+    CHECK_FALSE(book.last_ofi());
+}
+
+TEST_CASE("genuine OFI measures queue changes and never snapshot displacement", "[book][ofi]") {
+    LocalBook book(LocalBook::Sequencing::bybit);
+    REQUIRE(book.apply(snapshot({lvl("100", "2")}, {lvl("102", "3")}, 1)) == BookApplyResult::reset);
+    CHECK_FALSE(book.last_ofi());
+    const auto epoch = book.epoch();
+    BookUpdate d;
+    d.sequence = 2;
+    d.bids = {lvl("100", "5")};
+    d.asks = {lvl("102", "5")};
+    REQUIRE(book.apply(d) == BookApplyResult::ok);
+    REQUIRE(book.last_ofi());
+    CHECK(book.last_ofi()->to_string() == "1"); // +3 bid -2 ask
+    CHECK(book.delta_counter() == 1);
+    CHECK(book.epoch() == epoch);
+    d.sequence = 3;
+    d.bids = {lvl("101", "4")};
+    d.asks = {};
+    REQUIRE(book.apply(d) == BookApplyResult::ok);
+    REQUIRE(book.last_ofi());
+    CHECK(book.last_ofi()->to_string() == "4"); // improved bid, new queue
+    d.sequence = 4;
+    d.bids = {lvl("101", "0")};
+    d.asks = {lvl("102", "0"), lvl("103", "7")};
+    REQUIRE(book.apply(d) == BookApplyResult::ok);
+    REQUIRE(book.last_ofi());
+    CHECK(book.last_ofi()->to_string() == "1"); // -4 removed bid +5 removed ask
+    d.sequence = 5;
+    d.bids = {};
+    d.asks = {lvl("102", "6")};
+    REQUIRE(book.apply(d) == BookApplyResult::ok);
+    REQUIRE(book.last_ofi());
+    CHECK(book.last_ofi()->to_string() == "-6"); // improved ask, new sell queue
+    d.sequence = 6;
+    d.asks = {lvl("102", "3")};
+    REQUIRE(book.apply(d) == BookApplyResult::ok);
+    REQUIRE(book.last_ofi());
+    CHECK(book.last_ofi()->to_string() == "3"); // removal; trade/cancel cause stays unknown
+    REQUIRE(book.apply(snapshot({lvl("50", "100")}, {lvl("51", "200")}, 1)) == BookApplyResult::reset);
+    CHECK_FALSE(book.last_ofi());
+    CHECK(book.epoch() > epoch);
+    CHECK(book.delta_counter() == 0);
+}
+
+TEST_CASE("OFI unavailable after sequence gap, reset or missing side", "[book][ofi]") {
+    LocalBook book(LocalBook::Sequencing::okx);
+    book.apply(snapshot({lvl("100", "1")}, {lvl("101", "1")}, 10));
+    BookUpdate d;
+    d.sequence = 11; d.prev_sequence = 10; d.bids = {lvl("100", "2")};
+    REQUIRE(book.apply(d) == BookApplyResult::ok);
+    REQUIRE(book.last_ofi());
+    d.sequence = 12; d.prev_sequence = 9;
+    REQUIRE(book.apply(d) == BookApplyResult::desync_gap);
+    CHECK_FALSE(book.last_ofi());
+    book.apply(snapshot({lvl("100", "1")}, {lvl("101", "1")}, 20));
+    d.sequence = 21; d.prev_sequence = 20; d.bids = {}; d.asks = {lvl("101", "0")};
+    REQUIRE(book.apply(d) == BookApplyResult::empty);
+    CHECK_FALSE(book.last_ofi());
+    CHECK_FALSE(book.synced());
+    d.sequence = 22; d.prev_sequence = 21; d.asks = {lvl("102", "1")};
+    CHECK(book.apply(d) == BookApplyResult::waiting);
+}
+
+TEST_CASE("invalid or empty books require a fresh valid snapshot before OFI", "[book][ofi]") {
+    LocalBook book(LocalBook::Sequencing::binance_futures);
+    book.reset_from_rest({}, {lvl("101", "1")}, 100, 0);
+    CHECK_FALSE(book.synced());
+    book.reset_from_rest({lvl("100", "1")}, {lvl("99", "1")}, 100, 0);
+    CHECK_FALSE(book.synced());
+    REQUIRE(book.apply(snapshot({lvl("100", "1")}, {lvl("101", "1")}, 100)) == BookApplyResult::reset);
+    BookUpdate bad;
+    bad.sequence = 101; bad.prev_sequence = 100; bad.bids = {lvl("100", "-1")};
+    CHECK(book.apply(bad) == BookApplyResult::invalid);
+    CHECK_FALSE(book.synced());
+    CHECK_FALSE(book.last_ofi());
+    REQUIRE(book.apply(snapshot({lvl("0", "1")}, {lvl("101", "1")}, 102)) == BookApplyResult::invalid);
 }

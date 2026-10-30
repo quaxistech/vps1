@@ -146,7 +146,7 @@ int ensure_partitions(pqxx::connection& conn, int days_back, int days_ahead) {
 void usage() {
     std::cout << "usage: alttech-schema [--dsn DSN] [--schema FILE] [--check] [--recreate]\n"
                  "                      [--ensure-partitions] [--days-back N] [--days-ahead N]\n"
-                 "                      [--digest]\n"
+                 "                      [--digest] [--upgrade FILE]\n"
                  "\n"
                  "  --digest  print the schema file's checksum and exit, without a database.\n"
                  "            It ignores comments and whitespace, so it answers \"would this\n"
@@ -158,6 +158,7 @@ void usage() {
 int main(int argc, char** argv) {
     std::string dsn;
     fs::path schema_file = "db/schema.sql";
+    fs::path upgrade_file;
     bool partitions_only = false;
     bool check_only = false;
     bool recreate = false;
@@ -171,6 +172,8 @@ int main(int argc, char** argv) {
             dsn = argv[++i];
         } else if (arg == "--schema" && i + 1 < argc) {
             schema_file = argv[++i];
+        } else if (arg == "--upgrade" && i + 1 < argc) {
+            upgrade_file = argv[++i];
         } else if (arg == "--ensure-partitions") {
             partitions_only = true;
         } else if (arg == "--check") {
@@ -204,6 +207,10 @@ int main(int argc, char** argv) {
         std::cerr << "--days-back/--days-ahead must be within [0, 365]\n";
         return 2;
     }
+    if (!upgrade_file.empty() && (partitions_only || recreate || digest_only)) {
+        std::cerr << "--upgrade cannot be combined with schema mutation/digest modes\n";
+        return 2;
+    }
     if (dsn.empty()) {
         if (const char* env = std::getenv("ALTTECH_MIGRATION_DSN")) dsn = env;
     }
@@ -228,7 +235,28 @@ int main(int argc, char** argv) {
         }
 
         int exit_code = 0;
-        if (partitions_only) {
+        if (!upgrade_file.empty()) {
+            if (applied_checksum(conn).empty()) throw std::runtime_error("base AltTech schema must be installed before forward upgrades");
+            const std::string sql = read_file(upgrade_file);
+            // Exact bytes: an applied upgrade may never be silently rewritten.
+            const std::string checksum = alttech::sha256_hex(sql);
+            const std::string name = upgrade_file.filename().string();
+            pqxx::work txn(conn);
+            txn.exec("CREATE TABLE IF NOT EXISTS alttech.schema_upgrades (name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+            const auto rows = txn.exec_params("SELECT checksum FROM alttech.schema_upgrades WHERE name=$1", name);
+            if (!rows.empty()) {
+                if (rows[0][0].as<std::string>() != checksum) throw std::runtime_error("applied upgrade checksum mismatch: " + name);
+                info("schema_upgrade_current", {{"name", name}, {"checksum", checksum}});
+            } else if (check_only) {
+                error("schema_upgrade_missing", {{"name", name}});
+                exit_code = 1;
+            } else {
+                txn.exec(sql);
+                txn.exec_params("INSERT INTO alttech.schema_upgrades(name,checksum) VALUES($1,$2)", name, checksum);
+                info("schema_upgrade_applied", {{"name", name}, {"checksum", checksum}});
+            }
+            if (check_only) txn.abort(); else txn.commit();
+        } else if (partitions_only) {
             const int created = ensure_partitions(conn, days_back, days_ahead);
             info("partitions_ensured", {{"created", created}});
         } else {

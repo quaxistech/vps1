@@ -12,7 +12,7 @@ namespace altstrategy::engine::test {
 // A calibrated econ estimate as AltML schema 2 publishes it: one horizon, the
 // three class probabilities and the expected net per side (cost included).
 inline MarketForecastView econ_forecast(int32_t horizon, double net_long_bps, double net_short_bps,
-                                        int64_t bar_open_ms = 960'000) {
+                                        int64_t bar_open_ms = 900'000) {
     MarketForecastView f;
     f.present = true;
     f.econ = true;
@@ -26,6 +26,7 @@ inline MarketForecastView econ_forecast(int32_t horizon, double net_long_bps, do
     f.round_trip_cost_bps = 16.0;
     f.model_id = "econ-test-" + std::to_string(horizon);
     f.bar_open_time_ms = bar_open_ms;
+    f.computed_at_ms = bar_open_ms + 60'000;
     f.prediction_schema_version = 3;
     f.calibrator = "temperature-1";
     f.recipe_version = "recipe-1";

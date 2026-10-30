@@ -17,6 +17,9 @@ namespace altml::messaging {
 // Runs inline at `altml run` startup (before any component touches NATS, which
 // preserves the ordering the old oneshot unit provided) and behind the manual
 // `altml nats-setup` subcommand. Returns false on any critical failure.
-bool nats_provision(const std::string& url, const config::ProjectConfig& project);
+// Explicit maintenance flag only: daemon stopped, widen the known minute-only
+// input filters in place without deleting/recreating its durable or cursor.
+bool nats_provision(const std::string& url, const config::ProjectConfig& project,
+                    bool widen_input_windows_stopped = false);
 
 } // namespace altml::messaging

@@ -365,6 +365,9 @@ install(TARGETS
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES db/schema.sql
     DESTINATION "${CMAKE_INSTALL_DATADIR}/alttech")
+install(DIRECTORY db/upgrades/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/alttech/upgrades"
+    FILES_MATCHING PATTERN "*.sql")
 install(DIRECTORY proto/
     DESTINATION "${CMAKE_INSTALL_DATADIR}/alttech/proto"
     FILES_MATCHING PATTERN "*.proto")

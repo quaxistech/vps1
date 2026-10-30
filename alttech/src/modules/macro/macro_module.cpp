@@ -59,9 +59,11 @@ std::vector<IntradayPoint> load_intraday(pqxx::work& txn, const std::string& cod
     // remotely: a self-join across postgres_fdw on 400k rows is a remote
     // round-trip per row.
     auto fetch = [&](const char* basis) {
-        std::map<int64_t, std::pair<double, bool>> out;
+        struct Quote { double value; bool traded; int64_t known_at_ms; };
+        std::map<int64_t, Quote> out;
         const auto rows = txn.exec_params(
-            "SELECT EXTRACT(EPOCH FROM b.event_time)*1000, b.close, b.quality_status "
+            "SELECT EXTRACT(EPOCH FROM b.event_time)*1000, b.close, b.quality_status, "
+            " (extract(epoch FROM GREATEST(b.ingest_time,b.updated_at))*1000)::bigint "
             "FROM altmacro_ref.macro_price_bars b "
             "JOIN altmacro_ref.macro_instruments i ON i.id = b.instrument_id "
             "WHERE i.code = $1 AND b.timeframe = '1m' AND b.price_basis = $2 "
@@ -72,8 +74,7 @@ std::vector<IntradayPoint> load_intraday(pqxx::work& txn, const std::string& cod
             code, std::string(basis), from_ms, to_ms);
         for (const auto& r : rows) {
             out.emplace(static_cast<int64_t>(r[0].as<double>()),
-                        std::make_pair(r[1].as<double>(),
-                                       r[2].as<std::string>() == "VALID"));
+                        Quote{r[1].as<double>(), r[2].as<std::string>() == "VALID", r[3].as<int64_t>()});
         }
         return out;
     };
@@ -85,16 +86,17 @@ std::vector<IntradayPoint> load_intraday(pqxx::work& txn, const std::string& cod
     out.reserve(bid.size());
     for (const auto& [t, b] : bid) {
         const auto a = ask.find(t);
-        if (a == ask.end()) continue;   // one side missing: no usable mid
+        if (a == ask.end() || a->second.value < b.value || b.value <= 0) continue;   // one side missing: no usable mid
         IntradayPoint p;
         p.t_ms = t;
-        p.mid = (b.first + a->second.first) / 2.0;
-        p.spread_bps = p.mid > 0.0 ? (a->second.first - b.first) / p.mid * 10'000.0 : 0.0;
+        p.mid = (b.value + a->second.value) / 2.0;
+        p.spread_bps = p.mid > 0.0 ? (a->second.value - b.value) / p.mid * 10'000.0 : 0.0;
         // Traded only when BOTH sides were real quotes. AltMacro marks a minute
         // STALE when the feed repeated the last price at zero volume, and a
         // return computed across such a stretch measures the carry-forward
         // rather than the market.
-        p.traded = b.second && a->second.second;
+        p.traded = b.traded && a->second.traded;
+        p.known_at_ms = std::max(b.known_at_ms, a->second.known_at_ms);
         out.push_back(p);
     }
     return out;
@@ -103,15 +105,26 @@ std::vector<IntradayPoint> load_intraday(pqxx::work& txn, const std::string& cod
 std::vector<DailyPoint> load_daily(pqxx::work& txn, const std::string& code) {
     std::vector<DailyPoint> out;
     const auto rows = txn.exec_params(
-        "SELECT EXTRACT(EPOCH FROM date_trunc('day', v.event_time))*1000, v.value "
-        "FROM altmacro_ref.macro_reference_values v "
-        "JOIN altmacro_ref.macro_instruments i ON i.id = v.instrument_id "
-        "WHERE i.code = $1 AND v.quality_status = 'VALID' AND v.value IS NOT NULL "
-        "ORDER BY v.event_time",
-        code);
+        "SELECT (extract(epoch FROM observation_time)*1000)::bigint,value,"
+        " (extract(epoch FROM available_at)*1000)::bigint,source_revision,quality_status,"
+        " (extract(epoch FROM version_at)*1000)::bigint "
+        "FROM ("
+        " SELECT r.instrument_id,r.observation_time,r.value,r.available_at,r.id AS source_revision,r.quality_status,"
+        " GREATEST(r.recorded_at,r.publication_time) AS version_at "
+        " FROM altmacro_ref.macro_reference_revisions r "
+        " UNION ALL "
+        " SELECT e.instrument_id,e.observation_time,e.value,"
+        " GREATEST(e.publication_time,e.ingest_time,"
+        "   e.vintage_date::timestamptz+interval '29 hours') AS available_at,"
+        " e.id AS source_revision,e.quality_status,COALESCE(e.vintage_date::timestamptz,e.publication_time,e.ingest_time) AS version_at "
+        " FROM altmacro_ref.macro_events e"
+        ") v JOIN altmacro_ref.macro_instruments i ON i.id=v.instrument_id "
+        "WHERE i.code=$1 ORDER BY available_at,observation_time,source_revision", code);
     out.reserve(rows.size());
     for (const auto& r : rows) {
-        out.push_back(DailyPoint{static_cast<int64_t>(r[0].as<double>()), r[1].as<double>()});
+        const bool valid = !r[1].is_null() && r[4].as<std::string>() == "VALID";
+        out.push_back(DailyPoint{r[0].as<int64_t>(), valid ? r[1].as<double>() : 0.0,
+            r[2].as<int64_t>(), r[3].as<int64_t>(), valid, r[5].as<int64_t>()});
     }
     return out;
 }
@@ -124,7 +137,8 @@ std::vector<DailyPoint> load_cnh_daily_mid(pqxx::work& txn) {
     std::vector<DailyPoint> out;
     const auto rows = txn.exec(
         "SELECT EXTRACT(EPOCH FROM date_trunc('day', b.event_time))*1000, "
-        "       (b.close + a.close) / 2.0 "
+        "       (b.close + a.close) / 2.0, "
+        "       EXTRACT(EPOCH FROM GREATEST(b.ingest_time, a.ingest_time, b.updated_at, a.updated_at))*1000 "
         "FROM altmacro_ref.macro_price_bars b "
         "JOIN altmacro_ref.macro_price_bars a "
         "  ON a.instrument_id = b.instrument_id AND a.timeframe = b.timeframe "
@@ -136,7 +150,8 @@ std::vector<DailyPoint> load_cnh_daily_mid(pqxx::work& txn) {
         "ORDER BY b.event_time");
     out.reserve(rows.size());
     for (const auto& r : rows) {
-        out.push_back(DailyPoint{static_cast<int64_t>(r[0].as<double>()), r[1].as<double>()});
+        out.push_back(DailyPoint{static_cast<int64_t>(r[0].as<double>()), r[1].as<double>(),
+                                 static_cast<int64_t>(r[2].as<double>())});
     }
     return out;
 }
@@ -293,16 +308,15 @@ Result<int64_t> store(persistence::PgPool& pool, int64_t set_id,
                 // minute already written -- is new knowledge and moves it to
                 // now(), as every other AltTech table does on revision; left at
                 // the first write, the revised values looked as if they had
-                // been known all along. A method change is not new knowledge
-                // (the block is as-of its minute by construction) and keeps the
-                // original time. An identical recompute touches nothing.
+                // been known all along. A method change is also a later
+                // computation, even with identical values. Never backdate it.
+                // An identical same-method recompute touches nothing. This is
+                // prospective writer behavior; historical rows are not repaired.
                 "ON CONFLICT (timeframe, bar_open_time, feature_set_version_id) DO UPDATE SET "
                 "  values = EXCLUDED.values, validity_bitmap = EXCLUDED.validity_bitmap, "
                 "  status = EXCLUDED.status, valid_count = EXCLUDED.valid_count, "
                 "  method_version = EXCLUDED.method_version, updated_at = now(), "
-                "  computed_at = CASE WHEN EXCLUDED.method_version = "
-                "      alttech.macro_feature_vectors.method_version THEN now() "
-                "      ELSE alttech.macro_feature_vectors.computed_at END "
+                "  computed_at = now() "
                 "WHERE (EXCLUDED.method_version <> alttech.macro_feature_vectors.method_version "
                 "       OR EXCLUDED.valid_count >= alttech.macro_feature_vectors.valid_count) "
                 "  AND (EXCLUDED.method_version <> alttech.macro_feature_vectors.method_version "
@@ -483,9 +497,15 @@ Result<void> run_macro(const YAML::Node& config, persistence::PgPool& pool,
         }
 
         int64_t sent = 0;
+        // Wire availability follows computation and durable storage, rather
+        // than the earlier cycle-start timestamp used to select observations.
+        const int64_t available_at_ms = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
         for (const auto& v : vectors) {
+            if (!n) break; // retry next cycle; never publish an unarchived block
             if (v.t_ms <= published_through_ms || v.t_ms > now) continue;
-            if (auto p = publish(nats, v, now); !p) {
+            if (auto p = publish(nats, v, available_at_ms); !p) {
                 log::warn("macro_publish_failed",
                           {{"bar_open_ms", v.t_ms}, {"error", p.error().message}});
                 break;   // keep order: retry from this minute next cycle

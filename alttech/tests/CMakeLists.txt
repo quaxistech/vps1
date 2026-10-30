@@ -1,5 +1,15 @@
 include(Catch)
 
+add_executable(alttech_volume_profile_tests unit/test_volume_profile.cpp)
+target_link_libraries(alttech_volume_profile_tests PRIVATE Catch2::Catch2WithMain)
+target_include_directories(alttech_volume_profile_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/modules/structure")
+catch_discover_tests(alttech_volume_profile_tests PROPERTIES LABELS unit TIMEOUT 30)
+
+add_executable(alttech_ofi_tests unit/test_ofi_windows.cpp)
+target_link_libraries(alttech_ofi_tests PRIVATE Catch2::Catch2WithMain)
+target_include_directories(alttech_ofi_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/modules/ofi")
+catch_discover_tests(alttech_ofi_tests PROPERTIES LABELS unit TIMEOUT 30)
+
 add_executable(alttech_unit_tests
     unit/test_feature_service_logic.cpp
     unit/test_shutdown.cpp)
@@ -162,3 +172,31 @@ add_executable(alttech_dataset_tests unit/test_dataset.cpp)
 target_link_libraries(alttech_dataset_tests PRIVATE Catch2::Catch2WithMain alttech_talib_features)
 target_include_directories(alttech_dataset_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/include")
 catch_discover_tests(alttech_dataset_tests PROPERTIES LABELS unit TIMEOUT 30)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME profile_coverage_pg
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/profile_coverage_pg.py)
+    set_tests_properties(profile_coverage_pg PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+    add_test(NAME schema_upgrade_pg
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/schema_upgrade_pg.py
+            $<TARGET_FILE:alttech-schema> ${CMAKE_SOURCE_DIR}/db/schema.sql
+            ${CMAKE_SOURCE_DIR}/db/upgrades/0001_analytics_outbox.sql)
+    set_tests_properties(schema_upgrade_pg PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+    add_test(NAME macro_availability_sql
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/macro_availability_sql.py)
+    set_tests_properties(macro_availability_sql PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
+
+add_executable(alttech_inventory_tests unit/test_module_inventory.cpp)
+target_link_libraries(alttech_inventory_tests PRIVATE Catch2::Catch2WithMain alttech_application
+    alttech_feature_module alttech_microstructure_module alttech_structure_module
+    alttech_regime_module alttech_cross_venue_module alttech_macro_module)
+target_include_directories(alttech_inventory_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/include")
+catch_discover_tests(alttech_inventory_tests PROPERTIES LABELS unit)
+
+# DT-03: causal alternative bars (pure generators).
+add_executable(alttech_event_bars_tests unit/test_event_bars.cpp)
+target_link_libraries(alttech_event_bars_tests PRIVATE Catch2::Catch2WithMain)
+target_include_directories(alttech_event_bars_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/modules/event_bars")
+catch_discover_tests(alttech_event_bars_tests PROPERTIES LABELS unit TIMEOUT 30)

@@ -118,10 +118,9 @@ modules:
     book_poll_max_pages_per_tick: 4
     book_poll_overlap_ms: 2000
     store_batch_size: 2000
-    # Every computed window (1s, 5s, 15s, 30s, 1m) is published live; only these
-    # are persisted. Sub-15s vectors dominate the storage budget and are only
-    # actionable in real time, so they stay live-only by default.
-    persist_windows: "15s,30s,1m"
+    # Every window commits before publication. Sub-minute history uses the
+    # existing bounded bitget_sub retention class for causal train/serve parity.
+    persist_windows: "1s,5s,15s,30s,1m"
     cycle_interval_sec: 30
     venue_lookback_min: 180
 

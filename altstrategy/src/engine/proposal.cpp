@@ -59,6 +59,7 @@ std::vector<std::string> invalid_reasons(const TradePlanVariant& p, const Decisi
     if (std::abs(p.entry_price - p.stop_loss_price) <= 0) r.push_back("ZERO_STOP_DISTANCE");
     if (std::abs(p.take_profit_price - p.entry_price) <= 0) r.push_back("ZERO_TARGET_DISTANCE");
     // Holding limit.
+    if (p.max_holding_time_ms < 5LL * 60 * 1000) r.push_back("HOLDING_TIME_BELOW_MINIMUM");
     if (p.max_holding_time_ms > k48h) r.push_back("HOLDING_TIME_EXCEEDS_LIMIT");
     // Time ordering: created < time_stop; entry timeout positive; time_stop future.
     if (p.time_stop_at_ms <= now_ms) r.push_back("INVALID_TIME_ORDERING");
@@ -97,6 +98,8 @@ TradeSignalProposal build_proposal(const ProposalInputs& in, int64_t now_ms) {
     const auto& c = in.candidate;
     const auto& p = in.plan;
     const auto& ml = in.ml;
+    const bool valid_holding = p.max_holding_time_ms >= 5LL * 60 * 1000 &&
+                               p.max_holding_time_ms <= k48h;
     TradeSignalProposal s;
     s.natural_key = ids::join({c.candidate_id, std::to_string(in.plan_version)});
     s.signal_proposal_id = ids::make("sig", s.natural_key);
@@ -138,8 +141,9 @@ TradeSignalProposal build_proposal(const ProposalInputs& in, int64_t now_ms) {
 
     // Signal validity: the market idea stays actionable for a slice of the
     // horizon, always shorter than the max holding (§14).
-    const int64_t validity = std::clamp<int64_t>(c.expected_horizon_ms / 4, 5LL * 60 * 1000,
-                                                 std::min<int64_t>(p.max_holding_time_ms, 2LL * 3600 * 1000));
+    const int64_t validity = !valid_holding ? 0 :
+        std::clamp<int64_t>(c.expected_horizon_ms / 4, 5LL * 60 * 1000,
+                           std::min<int64_t>(p.max_holding_time_ms, 2LL * 3600 * 1000));
     s.valid_until_ms = now_ms + validity;
 
     // Forward-looking economics come from AltML or they do not exist.
@@ -170,15 +174,19 @@ TradeSignalProposal build_proposal(const ProposalInputs& in, int64_t now_ms) {
         s.expected_net_return = units::bps_to_fraction(c.econ.expected_net_bps);
         s.ml_conviction = std::clamp(c.econ.p_side - c.econ.p_opposite, -1.0, 1.0);
         const int64_t hold = static_cast<int64_t>(c.econ.horizon_minutes) * 60'000;
-        s.expected_holding_time_p50_ms = std::clamp<int64_t>(hold, 60'000, p.max_holding_time_ms);
-        s.expected_holding_time_p90_ms = std::min<int64_t>(hold, p.max_holding_time_ms);
+        s.expected_holding_time_p50_ms = valid_holding ?
+            std::clamp<int64_t>(hold, 60'000, p.max_holding_time_ms) : 0;
+        s.expected_holding_time_p90_ms = valid_holding ?
+            std::min<int64_t>(hold, p.max_holding_time_ms) : 0;
         if (!c.econ.model_id.empty()) s.model_versions.push_back(c.econ.model_id);
     } else {
         // No model, so no edge estimate. The holding times below come from the
         // strategy's own declared horizon, which IS produced by something.
         s.edge_estimated = false;
-        s.expected_holding_time_p50_ms = std::min<int64_t>(c.expected_horizon_ms / 2, p.max_holding_time_ms);
-        s.expected_holding_time_p90_ms = std::min<int64_t>(c.expected_horizon_ms, p.max_holding_time_ms);
+        s.expected_holding_time_p50_ms = valid_holding ?
+            std::min<int64_t>(c.expected_horizon_ms / 2, p.max_holding_time_ms) : 0;
+        s.expected_holding_time_p90_ms = valid_holding ?
+            std::min<int64_t>(c.expected_horizon_ms, p.max_holding_time_ms) : 0;
     }
 
     // The signal's content: the market view on every horizon, the setup's

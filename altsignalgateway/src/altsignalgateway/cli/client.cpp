@@ -122,15 +122,8 @@ int run_query(const std::function<void(const pb::ClientFrame&)>& send,
         }
         // Integrity: a queried payload re-hashes to the envelope's value, the
         // same check a delivered frame gets.
-        int verified = 0;
-        int mismatched = 0;
-        const auto check = [&](const pb::SignalMessage& m) {
-            const auto h = messaging::canonical_hash(m.payload());
-            if (h && *h == m.envelope().payload_sha256()) ++verified;
-            else ++mismatched;
-        };
-        if (resp.has_signal()) check(resp.signal().signal());
-        if (resp.has_context()) check(resp.context().signal());
+        // recv verified the original wire slices before exposing this frame.
+        const int verified = (resp.has_signal() || resp.has_context()) ? 1 : 0;
         std::string json;
         google::protobuf::util::JsonPrintOptions opts;
         opts.add_whitespace = true;
@@ -138,9 +131,8 @@ int run_query(const std::function<void(const pb::ClientFrame&)>& send,
         (void)google::protobuf::util::MessageToJsonString(resp, &json, opts);
         std::printf("%s\n", json.c_str());
         if (!quiet) {
-            std::fprintf(stderr, "payload hashes verified=%d mismatched=%d\n", verified, mismatched);
+            std::fprintf(stderr, "payload hashes verified=%d mismatched=0\n", verified);
         }
-        if (mismatched > 0) return 1;
         return resp.has_error() ? 3 : 0;
     }
 }
@@ -338,6 +330,12 @@ int cmd_client(const Args& args) {
             beast::flat_buffer buffer;
             ws.read(buffer);
             const auto data = buffer.cdata();
+            const std::string_view raw(static_cast<const char*>(data.data()), data.size());
+            if (const auto verified = messaging::verify_server_payloads(raw); !verified) {
+                std::fprintf(stderr, "server integrity verification failed: %s\n",
+                             verified.error().message.c_str());
+                return false;
+            }
             return out.ParseFromArray(data.data(), static_cast<int>(data.size()));
         };
 
@@ -487,16 +485,7 @@ int cmd_client(const Args& args) {
                     // Verify the integrity hash before doing anything else with
                     // the trade. A consumer that acts first and checks later is
                     // a consumer that acts on corrupted instructions.
-                    auto canonical = messaging::canonical_serialize(msg.payload());
-                    const bool hash_ok =
-                        canonical && sha256_hex(*canonical) == msg.envelope().payload_sha256();
-                    if (!hash_ok) {
-                        std::fprintf(stderr,
-                                     "PAYLOAD HASH MISMATCH on seq=%lld signal_id=%s — not acked\n",
-                                     static_cast<long long>(msg.envelope().sequence()),
-                                     msg.envelope().signal_id().c_str());
-                        return 1;
-                    }
+                    // recv already verified the exact received payload bytes.
                     if (!quiet) {
                         if (as_json) {
                             std::string json;

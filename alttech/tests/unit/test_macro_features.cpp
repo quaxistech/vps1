@@ -157,6 +157,63 @@ TEST_CASE("a daily figure is unusable until it is published", "[macro][asof]") {
     CHECK(available_at_ms("REF.USDCNY.PBOC", kMon) < available_at_ms("REF.USDCNY.FED", kMon));
 }
 
+TEST_CASE("actual macro revision clocks override schedules without hindsight", "[macro][asof][revision]") {
+    constexpr int64_t release = kMon + 12 * 3'600'000;
+    MacroInputs in;
+    in.vix = {DailyPoint{kMon, 15, release, 1, true},
+              DailyPoint{kMon, 99, release + 3'600'000, 2, true}};
+    const auto before = compute_macro_series(in, release - kMinute, release);
+    REQUIRE(before.size() == 1);
+    CHECK_FALSE(before[0].is_valid(pos_of("vix_level")));
+    const auto first = compute_macro_series(in, release, release + kMinute);
+    REQUIRE(first.size() == 1);
+    REQUIRE(first[0].is_valid(pos_of("vix_level")));
+    CHECK(first[0].values[pos_of("vix_level")] == 15);
+    const auto revised = compute_macro_series(in, release + 3'600'000, release + 3'600'000 + kMinute);
+    REQUIRE(revised[0].is_valid(pos_of("vix_level")));
+    CHECK(revised[0].values[pos_of("vix_level")] == 99);
+}
+
+TEST_CASE("late older macro observation cannot block a known newer observation", "[macro][asof][revision]") {
+    constexpr int64_t release = kMon + 12 * 3'600'000;
+    MacroInputs in;
+    in.vix = {DailyPoint{kMon - kDay, 999, release + 3'600'000, 1, true},
+              DailyPoint{kMon, 20, release, 2, true},
+              DailyPoint{kMon, 0, release + 2 * 3'600'000, 3, false}};
+    const auto first = compute_macro_series(in, release, release + kMinute);
+    REQUIRE(first[0].is_valid(pos_of("vix_level")));
+    CHECK(first[0].values[pos_of("vix_level")] == 20);
+    const auto late = compute_macro_series(in, release + 3'600'000, release + 3'600'000 + kMinute);
+    REQUIRE(late[0].is_valid(pos_of("vix_level")));
+    CHECK(late[0].values[pos_of("vix_level")] == 20);
+    const auto invalid = compute_macro_series(in, release + 2 * 3'600'000, release + 2 * 3'600'000 + kMinute);
+    CHECK_FALSE(invalid[0].is_valid(pos_of("vix_level")));
+}
+
+TEST_CASE("a late quote side never enters an earlier macro feature", "[macro][asof][intraday]") {
+    MacroInputs in;
+    auto quote = pt(tick(kMon), 7.0);
+    quote.known_at_ms = kMon + kMinute;
+    in.usdcnh.push_back(quote);
+    in.fixing.push_back(DailyPoint{kMon - kDay, 7.1, kMon - kMinute, 1, true});
+    const auto before = compute_macro_series(in, kMon, kMon + kMinute);
+    REQUIRE(before.size() == 1);
+    CHECK_FALSE(before[0].is_valid(pos_of("cnh_vs_fixing_bps")));
+    const auto after = compute_macro_series(in, kMon + kMinute, kMon + 2 * kMinute);
+    REQUIRE(after.size() == 1);
+    CHECK(after[0].is_valid(pos_of("cnh_vs_fixing_bps")));
+}
+
+TEST_CASE("late backfill of an older vintage cannot replace a known newer vintage", "[macro][asof][revision]") {
+    constexpr int64_t release = kMon + 12 * 3'600'000;
+    MacroInputs in;
+    in.vix = {DailyPoint{kMon, 20, release, 1, true, kMon},
+              DailyPoint{kMon, 999, release + kMinute, 2, true, kMon - kDay}};
+    const auto values = compute_macro_series(in, release + kMinute, release + 2 * kMinute);
+    REQUIRE(values[0].is_valid(pos_of("vix_level")));
+    CHECK(values[0].values[pos_of("vix_level")] == 20);
+}
+
 TEST_CASE("a carried-forward quote yields no return", "[macro][stale]") {
     // Across a weekend the feed repeats Friday's price at zero volume. A return
     // computed over that stretch is exactly zero -- a number that looks like a

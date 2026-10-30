@@ -7,9 +7,13 @@ namespace altstrategy::engine {
 
 int32_t evaluation_horizon_minutes(int64_t expected_horizon_ms) {
     constexpr int64_t kMin = 60'000;
-    if (expected_horizon_ms <= 30 * kMin) return 15;
-    if (expected_horizon_ms <= 120 * kMin) return 60;
-    return 240;
+    // A horizon return distribution is not a forecast of a different holding
+    // period. Keep the genuine setup horizon; unsupported durations have no
+    // compatible monetary estimate until a matching artifact is trained.
+    for (const int32_t horizon : {15, 60, 240}) {
+        if (expected_horizon_ms == static_cast<int64_t>(horizon) * kMin) return horizon;
+    }
+    return 0;
 }
 
 namespace {
@@ -35,6 +39,11 @@ EconomicDecision evaluate_economics_at(Side side, int32_t horizon_minutes,
                                        const EconomicPolicyConfig& cfg) {
     EconomicDecision d;
     d.horizon_minutes = horizon_minutes;
+    if (horizon_minutes <= 0) {
+        d.state = EconState::model_unavailable;
+        d.reason_code = "PAYOFF_HORIZON_UNSUPPORTED";
+        return d;
+    }
     const auto it = ctx.forecasts.find(d.horizon_minutes);
     if (it == ctx.forecasts.end() || !it->second.present) {
         d.state = EconState::model_unavailable;

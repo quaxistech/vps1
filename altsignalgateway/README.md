@@ -46,8 +46,10 @@ never move a delivery cursor. The Gateway reads upstream T0 enrichment without
 altering setup prices, recommendation or provenance; absent context stays absent.
 
 See [configuration](docs/CONFIGURATION.md), [architecture](docs/ARCHITECTURE.md)
-and [consumer guide](docs/CONSUMER_GUIDE.md). The repository diagnostic client's
-serialization limitation is recorded in [source limitations](../docs/source-contract-limitations.md).
+and [consumer guide](docs/CONSUMER_GUIDE.md). The diagnostic client verifies exact
+received payload bytes in delivery and signal/context query frames, with bounds
+and duplicate-field rejection. History pages carry summaries, not payloads.
+The original audit baseline is retained in [source limitations](../docs/source-contract-limitations.md).
 
 ## Commands
 

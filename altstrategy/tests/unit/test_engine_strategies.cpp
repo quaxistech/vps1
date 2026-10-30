@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -40,6 +41,45 @@ TEST_CASE("catalogue holds the sixteen specified strategies with distinct famili
                        Family::microstructure, Family::order_flow, Family::basis,
                        Family::liquidity})
         CHECK(families.count(fam) == 1);
+}
+
+TEST_CASE("all sixteen strategies refuse absent or zero true ATR", "[catalogue][quality]") {
+    StrategyEngine engine;
+    auto ctx = make_ctx();
+    ctx.cross_venue_features.values["atr_14"] = 1.0; // cannot stand in for Bitget ATR
+    ctx.microstructure.values["atr_14"] = 1.0;
+    for (const auto& meta : engine.metas()) {
+        CAPTURE(meta.strategy_id);
+        for (const double atr : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN()}) {
+            ctx.bitget_features.values["atr_14"] = atr;
+            std::string reason;
+            CHECK_FALSE(StrategyEngine::eligible(meta, Lifecycle::active, ctx, &reason));
+            CHECK(reason == "missing_feature");
+        }
+    }
+}
+
+TEST_CASE("invalid prerequisite source cannot borrow another block's valid flag", "[catalogue][quality]") {
+    StrategyEngine engine;
+    auto ctx = make_ctx();
+    ctx.bitget_features.valid = false;
+    for (const auto& meta : engine.metas()) {
+        std::string reason;
+        CAPTURE(meta.strategy_id);
+        CHECK_FALSE(StrategyEngine::eligible(meta, Lifecycle::active, ctx, &reason));
+        CHECK(reason == "missing_feature");
+    }
+}
+
+TEST_CASE("candidate validity never extends source context expiry", "[catalogue][ttl]") {
+    StrategyEngine engine;
+    auto ctx = make_ctx();
+    constexpr int64_t now = 1'000'050;
+    ctx.expires_at_ms = now + 10;
+    const auto candidates = engine.run(ctx, now, {});
+    REQUIRE_FALSE(candidates.empty());
+    for (const auto& candidate : candidates) CHECK(candidate.expires_at_ms == now + 10);
+    CHECK(engine.run(ctx, now + 10, {}).empty());
 }
 
 TEST_CASE("range rejection is measured by position in the range, not by momentum") {

@@ -247,6 +247,7 @@ void run_venue_sweep(persistence::PgPool& pool, messaging::NatsClient& nats,
                     auto ctx = store::load_context(pool, pv, **bar);
                     if (!ctx) continue;
                     if (store::write_venue_micro(pool, pv, **bar, feature_set_id, *ctx, close)) {
+                        // The exact vector and notification commit together.
                         ++produced;
                     }
                     break;

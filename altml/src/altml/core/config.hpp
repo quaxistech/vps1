@@ -56,13 +56,10 @@ struct ProjectConfig {
     // venue's book/tape from arriving at all, which is the exact failure the
     // widening was made to fix. Defaults must state the shipped contract.
     std::vector<std::string> input_subject_filters = {"alttech.feature.>",
-                                                      "alttech.microfeature.venue.*.*.1m.v1"};
-    // Renamed with the filter widening. ensure_consumer() refuses to mutate a
-    // durable whose contract has drifted -- deliberately, so nothing silently
-    // rebinds a consumer's subject underneath a running system -- so a new
-    // filter needs a new durable. The old `inference-features` is left in place
-    // and simply stops being read; deleting it is an operator decision, not
-    // something a service start should do to its own upstream.
+                                                      "alttech.microfeature.venue.>"};
+    // Ordinary startup refuses filter drift. The explicit stopped-daemon
+    // nats-setup window migration widens the known minute-only contract in
+    // place, preserving this durable and its ACK frontier; no cursor reset.
     std::string durable = "inference-features-v4";
     // output (owned and provisioned by altml; consumers create durables on it)
     std::string output_stream = "ALTML_ANALYTICS";

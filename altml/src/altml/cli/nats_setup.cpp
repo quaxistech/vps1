@@ -24,8 +24,11 @@ namespace altml::cli {
 namespace {
 
 void print_usage() {
-    std::puts("usage: altml nats-setup [--url NATS_URL] [--config /etc/altml/altml.yaml]\n\n"
-              "Provisions/validates the project's JetStream streams and durable.");
+    std::puts("usage: altml nats-setup [--url NATS_URL] [--config /etc/altml/altml.yaml]\n"
+              "       [--widen-input-windows-stopped]\n\n"
+              "Provisions/validates the project's JetStream streams and durable.\n"
+              "Window migration requires the daemon stopped and no inflight/pending pulls;\n"
+              "it widens only the known minute filter in place and preserves the cursor.");
 }
 
 } // namespace
@@ -33,12 +36,15 @@ void print_usage() {
 int cmd_nats_setup(int argc, char** argv) {
     std::string url;
     std::string config_path;
+    bool widen_input_windows_stopped = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--url" && i + 1 < argc) {
             url = argv[++i];
         } else if (a == "--config" && i + 1 < argc) {
             config_path = argv[++i];
+        } else if (a == "--widen-input-windows-stopped") {
+            widen_input_windows_stopped = true;
         } else if (a == "--help" || a == "-h") {
             print_usage();
             return 0;
@@ -71,7 +77,7 @@ int cmd_nats_setup(int argc, char** argv) {
         return 2;
     }
 
-    return messaging::nats_provision(url, project) ? 0 : 1;
+    return messaging::nats_provision(url, project, widen_input_windows_stopped) ? 0 : 1;
 }
 
 } // namespace altml::cli

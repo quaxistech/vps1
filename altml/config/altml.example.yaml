@@ -29,11 +29,11 @@ project:
     # different payload shape this service does not decode.
     # AltTech publishes what AltML reads under two roots:
     #   alttech.feature.>                      venue + cross-venue vectors
-    #   alttech.microfeature.venue.*.*.1m.v1   the execution venue's book/tape
+    #   alttech.microfeature.venue.>          independently typed book/tape windows
     # The 1m window is pinned: 15s/30s windows have no bar to belong to.
     subject_filter:
       - alttech.feature.>
-      - alttech.microfeature.venue.*.*.1m.v1
+      - alttech.microfeature.venue.>
     durable: inference-features-v4
   output:
     stream: ALTML_ANALYTICS         # owned by altml; consumers create durables here
@@ -83,6 +83,28 @@ training:
   # Feature inputs and horizons are explicit. Source identities and the
   # feature recipe are recorded with each trained model.
   econ_sources: ["1:15m:60", "1:1h:180"]
+  # recipe-1 is the deployed contract; a model records the recipe it was trained
+  # on and inference serves it that projection.
+  recipe_version: recipe-1
+  # DT-02/04/05/09/10 (2026-10-30): the recipe-2 candidate -- candlestick and
+  # further scale-free TA-Lib readings, plus the typed families the generic loader
+  # joins known-at-T0 (Bitget micro, reference-venue micro published by AltTech
+  # since DT-19, cross-venue consensus and lead/lag, macro-core on its real vintage
+  # clocks since EX-16). Each real AltML horizon artifact retains its own
+  # calibration/registry gates and exact recipe. These are upstream LightGBM
+  # forecasts, not the separate VPS2 paired ModelSet. To train a candidate, set:
+  #   recipe_version: recipe-2
+  #   econ_sources: ["1:15m:60", "1:1h:180", "1:1m:5:bitget_micro:1:-:alttech-micro-1",
+  #                  "2:1m:5:reference_lite_micro:4:-:alttech-reference-1",
+  #                  "3:1m:5:reference_lite_micro:4:-:alttech-reference-1",
+  #                  "4:1m:5:reference_lite_micro:4:-:alttech-reference-1",
+  #                  "0:1m:5:cross_venue_core:2:-:xv-1.0.0",
+  #                  "0:1m:5:macro-core:1:0:mc-1.4.0"]
+  # Fast-window sources keep independent millisecond spans and are archived
+  # only when selected here or required by a loaded model. Genuine delta OFI
+  # is available on sequence-qualified reference venues, not Bitget books15:
+  #   "2:5s:1:book_ofi_receipt:1:-:alttech-ofi-1"
+  # The seventh source field pins producer method; "-" means per-instrument.
   econ_min_holdout_t: 2.0           # day-clustered t of holdout net return to promote
   econ_time_budget_sec: 1500        # boosting budget per horizon
   # Cost model v2 (econ_logic.hpp): fee from altml.fee_models (both legs taker),

@@ -34,8 +34,7 @@ TEST_CASE("project defaults state the shipped subscription contract") {
                    p.input_subject_filters.end();
         };
         REQUIRE(has("alttech.feature.>"));
-        // Pinned to the 1m window on purpose: shorter windows have no bar to
-        // belong to and the decoder refuses them.
-        REQUIRE(has("alttech.microfeature.venue.*.*.1m.v1"));
+        // Window identities and configured capture keep fast sources separate.
+        REQUIRE(has("alttech.microfeature.venue.>"));
     }
 }

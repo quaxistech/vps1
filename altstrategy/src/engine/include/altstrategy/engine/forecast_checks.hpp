@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace altstrategy::engine::fc {
 
@@ -33,7 +34,10 @@ namespace altstrategy::engine::fc {
 
 // Age measured from the close of the 1m bar the estimate was made on.
 [[nodiscard]] inline bool fresh(const MarketForecastView& f, int64_t now_ms, int64_t max_age_ms) {
+    if (now_ms <= 0 || max_age_ms <= 0 || f.bar_open_time_ms < 0 ||
+        f.bar_open_time_ms > std::numeric_limits<int64_t>::max() - 60'000) return false;
     const int64_t close_ms = f.bar_open_time_ms + 60'000;
+    if (close_ms > now_ms || f.computed_at_ms < close_ms || f.computed_at_ms > now_ms) return false;
     return now_ms - close_ms <= max_age_ms;
 }
 

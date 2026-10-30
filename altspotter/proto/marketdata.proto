@@ -91,6 +91,12 @@ message OrderBookDelta {
     int64 previous_sequence = 5; // Binance pu / OKX prevSeqId; 0 when n/a
     int64 exchange_time_ms = 6;
     sint64 checksum = 7;
+    // Exact base-quantity best-queue OFI, only after sequence/checksum checks.
+    // Absence is not zero. A snapshot/reset never contributes order flow.
+    optional Decimal ofi_base = 8;
+    uint64 book_epoch = 9;
+    uint64 delta_counter = 10; // detects transport loss even where venue u skips
+    optional Decimal bbo_depth_base = 11; // current bid+ask queue denominator
 }
 
 // ---------------------------------------------------------------------------

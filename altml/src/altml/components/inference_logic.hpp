@@ -11,9 +11,41 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
 
 namespace altml::inference {
+
+// All dependency clocks and revisions travel with the cached values. Keeping
+// multiple revisions lets a delayed target select the version available at its
+// own cutoff rather than the last correction received by this process.
+struct AlignedObservation {
+    int64_t bar_open_ms = 0;
+    int32_t feature_set_version = 0;
+    std::vector<float> values;
+    int64_t bar_revision = 0;
+    int64_t computed_at_ms = 0;
+    int64_t received_at_ms = 0;
+    std::string engine_version{};
+};
+
+inline void record_aligned_revision(std::deque<AlignedObservation>& hist,
+                                    AlignedObservation obs, size_t cap) {
+    if (cap == 0) return;
+    const auto key = [](const AlignedObservation& v) {
+        return std::tuple{v.bar_open_ms, v.computed_at_ms, v.bar_revision,
+                          v.received_at_ms, v.feature_set_version};
+    };
+    const auto it = std::lower_bound(hist.begin(), hist.end(), key(obs),
+        [&](const AlignedObservation& v, const auto& want) { return key(v) < want; });
+    if (it != hist.end() && key(*it) == key(obs)) return;
+    if (hist.size() >= cap && it == hist.begin()) return;
+    hist.insert(it, std::move(obs));
+    while (hist.size() > cap) hist.pop_front();
+}
 
 // An empty string means the vector is safe to feed into the live model.
 // Freshness is anchored to the source bar close and durable computation time,
@@ -118,6 +150,15 @@ inline altml::v1::FeatureVectorStatus map_microstructure_status(
     }
 }
 
+inline std::optional<altml::v1::Timeframe> window_timeframe(std::string_view window) {
+    if (window == "1m") return altml::v1::TF_1M;
+    if (window == "1s") return altml::v1::TF_1S;
+    if (window == "5s") return altml::v1::TF_5S;
+    if (window == "15s") return altml::v1::TF_15S;
+    if (window == "30s") return altml::v1::TF_30S;
+    return std::nullopt;
+}
+
 // The production decoder, in a header so the regression test can call it
 // rather than a copy of it.
 inline bool repack_feature_envelope(const alttech::v1::Envelope& in, altml::v1::Envelope* out) {
@@ -141,8 +182,9 @@ inline bool repack_feature_envelope(const alttech::v1::Envelope& in, altml::v1::
     const bool has_venue = in.has_venue_feature_vector();
     const bool has_cross = in.has_cross_venue_feature_vector();
     const bool has_micro = in.has_microstructure_vector();
+    const bool has_venue_micro = in.has_venue_microstructure_vector();
     if (in.schema_version() != messaging::kSchemaVersion ||
-        (!has_core && !has_venue && !has_cross && !has_micro)) {
+        (!has_core && !has_venue && !has_cross && !has_micro && !has_venue_micro)) {
         return false;
     }
     const int venue = static_cast<int>(in.exchange());
@@ -186,14 +228,14 @@ inline bool repack_feature_envelope(const alttech::v1::Envelope& in, altml::v1::
     // not subscribe to that subject and its decoder had tag 31 RESERVED, so the
     // richest stream in the system (1.28M messages) reached nothing.
     //
-    // Only the 1m window is admitted: the archive is keyed by a bar grid, and a
-    // 15s or 30s window has no bar to belong to. They are refused rather than
-    // rounded into a minute they only partly cover.
+    // Each fast window has a distinct internal timeframe identity. It is never
+    // rounded into a minute; the source recipe keeps its exact millisecond span.
     if (has_micro) {
         const auto& m = in.microstructure_vector();
-        if (m.window_label() != "1m") return false;
+        const auto timeframe = window_timeframe(m.window_label());
+        if (!timeframe) return false;
         auto* mv = out->mutable_feature_vector();
-        mv->set_timeframe(altml::v1::TF_1M);
+        mv->set_timeframe(*timeframe);
         mv->set_bar_open_time_ms(m.window_start_ms());
         mv->set_bar_revision(0);  // tumbling windows are not revised
         mv->set_feature_set_name(m.feature_set_name());
@@ -204,6 +246,32 @@ inline bool repack_feature_envelope(const alttech::v1::Envelope& in, altml::v1::
         mv->set_validity_bitmap(m.validity_bitmap());
         mv->set_computed_at_ms(m.computed_at_ms());
         mv->set_status(map_microstructure_status(m.status()));
+        return true;
+    }
+
+    if (has_venue_micro) {
+        const auto& m = in.venue_microstructure_vector();
+        const auto timeframe = window_timeframe(m.window_label());
+        if (!timeframe || static_cast<int>(m.exchange()) != venue ||
+            m.canonical_pair_id() != in.canonical_pair_id()) return false;
+        // A named true-OFI source cannot be substituted by sampled imbalance.
+        if (m.feature_set_name() == "book_ofi_receipt" &&
+            (m.feature_set_version() != 1 || m.profile() != "sequence_validated_delta" ||
+             m.engine_version() != "alttech-ofi-1" || m.values_size() != 4 || venue == 1)) return false;
+        if (m.feature_set_name() == "book_ofi_receipt" &&
+            m.schema_hash() != "d10ab556ae283a0565fd19e9d3867b5001d97b9850332b49db593989ff7d6f93") return false;
+        auto* mv = out->mutable_feature_vector();
+        mv->set_timeframe(*timeframe);
+        mv->set_bar_open_time_ms(m.window_start_ms());
+        mv->set_bar_revision(0);
+        mv->set_feature_set_name(m.feature_set_name());
+        mv->set_feature_set_version(m.feature_set_version());
+        mv->set_schema_hash(m.schema_hash());
+        mv->set_engine_version(m.engine_version());
+        mv->mutable_values()->CopyFrom(m.values());
+        mv->set_validity_bitmap(m.validity_bitmap());
+        mv->set_computed_at_ms(m.computed_at_ms());
+        mv->set_status(map_analytics_status(m.status()));
         return true;
     }
 

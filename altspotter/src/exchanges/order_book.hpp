@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,8 @@ enum class BookApplyResult {
     desync_gap,     // sequence discontinuity — resync required
     desync_checksum,// checksum mismatch — resync required
     crossed,        // bid >= ask after apply — suspect state
+    empty,          // a side vanished — no BBO, reseed required
+    invalid,        // nonpositive price/negative quantity in a level
 };
 
 // Local order book with venue-specific sequencing validated by a pluggable
@@ -56,7 +59,8 @@ public:
     //                     prevSeqId == previous seqId; crc32 checksum verified.
     enum class Sequencing { binance_futures, bybit, okx };
 
-    explicit LocalBook(Sequencing seq) : sequencing_(seq) {}
+    explicit LocalBook(Sequencing seq, uint64_t initial_epoch = 0)
+        : sequencing_(seq), epoch_(initial_epoch) {}
 
     // Apply a snapshot or delta; returns the outcome (desync_* => caller must
     // trigger the venue resync flow and stop publishing VALID state).
@@ -71,6 +75,11 @@ public:
     [[nodiscard]] bool synced() const noexcept { return synced_; }
     [[nodiscard]] int64_t last_sequence() const noexcept { return last_seq_; }
     [[nodiscard]] int64_t last_exchange_ms() const noexcept { return last_exchange_ms_; }
+    // Cont/Kukanov/Stoikov best-queue increment from the last successfully
+    // applied delta. Snapshots, duplicates and failed continuity have no flow.
+    [[nodiscard]] const std::optional<Decimal>& last_ofi() const noexcept { return last_ofi_; }
+    [[nodiscard]] uint64_t epoch() const noexcept { return epoch_; }
+    [[nodiscard]] uint64_t delta_counter() const noexcept { return delta_counter_; }
     [[nodiscard]] size_t bid_levels() const noexcept { return bids_.size(); }
     [[nodiscard]] size_t ask_levels() const noexcept { return asks_.size(); }
 
@@ -95,6 +104,9 @@ private:
     bool first_after_reset_ = false; // Binance: awaiting the straddling event
     int64_t last_seq_ = 0;
     int64_t last_exchange_ms_ = 0;
+    std::optional<Decimal> last_ofi_;
+    uint64_t epoch_ = 0;
+    uint64_t delta_counter_ = 0;
     std::map<Decimal, Level, std::greater<Decimal>> bids_; // best (highest) first
     std::map<Decimal, Level, std::less<Decimal>> asks_;    // best (lowest) first
 };

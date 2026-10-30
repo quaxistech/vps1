@@ -43,6 +43,6 @@ const std::vector<std::string>& macro_feature_names();
 
 inline constexpr const char* kMacroFeatureSetName = "macro-core";
 inline constexpr int kMacroFeatureSetVersion = 1;
-inline constexpr const char* kMacroMethodVersion = "mc-1.3.0";
+inline constexpr const char* kMacroMethodVersion = "mc-1.4.0";
 
 } // namespace alttech::modules::macro

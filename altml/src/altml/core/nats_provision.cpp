@@ -176,6 +176,7 @@ bool require_stream(jsCtx* js, const char* name,
 
 bool ensure_consumer(jsCtx* js, const char* stream, const char* durable,
                      const std::vector<std::string>& filters,
+                     bool widen_input_windows_stopped = false,
                      jsDeliverPolicy deliver_policy = js_DeliverAll) {
     jsConsumerConfig desired;
     jsConsumerConfig_Init(&desired);
@@ -221,14 +222,50 @@ bool ensure_consumer(jsCtx* js, const char* stream, const char* durable,
             return true;
         };
         const jsConsumerConfig* actual = ci->Config;
-        const bool matches = actual != nullptr &&
+        const bool profile_matches = actual != nullptr &&
                              actual->AckPolicy == desired.AckPolicy &&
                              actual->DeliverPolicy == desired.DeliverPolicy &&
                              actual->AckWait == desired.AckWait &&
                              actual->MaxDeliver == desired.MaxDeliver &&
                              actual->MaxAckPending == desired.MaxAckPending &&
-                             actual->DeliverSubject == nullptr &&
-                             same_filters(actual, desired);
+                             actual->DeliverSubject == nullptr;
+        const bool matches = profile_matches && same_filters(actual, desired);
+        if (!matches && widen_input_windows_stopped && profile_matches &&
+            filters == std::vector<std::string>{"alttech.feature.>", "alttech.microfeature.venue.>"} &&
+            actual->FilterSubjectsLen == 2 && actual->FilterSubjects != nullptr &&
+            same_text(actual->FilterSubjects[0], "alttech.feature.>") &&
+            same_text(actual->FilterSubjects[1], "alttech.microfeature.venue.*.*.1m.v1")) {
+            // Maintenance precondition: stop the daemon and let its current
+            // receipts settle. No consumer deletion, start-sequence override,
+            // acknowledgement, message deletion or synthetic replay occurs.
+            if (ci->NumAckPending != 0 || ci->NumWaiting != 0 ||
+                ci->Delivered.Stream != ci->AckFloor.Stream) {
+                error("input_window_migration_refused", {{"reason", "consumer_not_quiescent"}});
+                jsConsumerInfo_Destroy(ci);
+                return false;
+            }
+            const auto ack_before = ci->AckFloor.Stream;
+            const auto delivered_before = ci->Delivered.Stream;
+            jsConsumerConfig widened = *actual;
+            widened.FilterSubject = nullptr;
+            widened.FilterSubjects = desired.FilterSubjects;
+            widened.FilterSubjectsLen = desired.FilterSubjectsLen;
+            jsConsumerInfo* updated = nullptr;
+            s = js_UpdateConsumer(&updated, js, stream, &widened, nullptr, &jerr);
+            const bool preserved = s == NATS_OK && updated != nullptr && updated->Config != nullptr &&
+                same_filters(updated->Config, desired) && updated->AckFloor.Stream == ack_before &&
+                updated->Delivered.Stream == delivered_before && updated->NumAckPending == 0;
+            jsConsumerInfo_Destroy(ci);
+            if (updated != nullptr) jsConsumerInfo_Destroy(updated);
+            if (!preserved) {
+                error("input_window_migration_unverified", {{"durable", durable},
+                    {"error_code", natsStatus_GetText(s)}});
+                return false; // inspect actual state; never recreate a durable
+            }
+            info("input_window_filters_widened", {{"durable", durable},
+                {"cursor_preserved", true}, {"historical_fast_replay", false}});
+            return true;
+        }
         if (!matches) {
             error("consumer_config_drift",
                   {{"stream", stream},
@@ -258,7 +295,13 @@ bool ensure_consumer(jsCtx* js, const char* stream, const char* durable,
 
 } // namespace
 
-bool nats_provision(const std::string& url, const config::ProjectConfig& project) {
+bool nats_provision(const std::string& url, const config::ProjectConfig& project,
+                    bool widen_input_windows_stopped) {
+    if (widen_input_windows_stopped && project.input_subject_filters !=
+        std::vector<std::string>{"alttech.feature.>", "alttech.microfeature.venue.>"}) {
+        error("input_window_migration_refused", {{"reason", "unsupported_target_filters"}});
+        return false;
+    }
     natsConnection* conn = nullptr;
     natsOptions* opts = nullptr;
     natsStatus s = natsOptions_Create(&opts);
@@ -323,7 +366,7 @@ bool nats_provision(const std::string& url, const config::ProjectConfig& project
 
     if (ok) {
         ok = ensure_consumer(js, project.input_stream.c_str(), project.durable.c_str(),
-                             project.input_subject_filters) && ok;
+                             project.input_subject_filters, widen_input_windows_stopped) && ok;
     }
 
     jsCtx_Destroy(js);

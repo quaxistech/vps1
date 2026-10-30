@@ -34,16 +34,15 @@ TEST_CASE("a market entry pays taker on both legs and crosses the spread twice")
     CHECK_THAT(c.round_trip_bps, WithinAbs(12.0 + 3.0 + 2.0, 1e-9));
 }
 
-TEST_CASE("a limit entry is a maker fill and crosses the spread only on the way out") {
+TEST_CASE("an unqualified limit proposal cannot claim a maker discount") {
     const auto c = compute_trade_cost(EntryType::limit, realistic(3.0, 2.0));
 
-    CHECK_THAT(c.fee_bps_round_trip, WithinAbs(kMakerFeeBps + kTakerFeeBps, 1e-9));
-    CHECK_THAT(c.spread_cost_bps, WithinAbs(1.5, 1e-9));
-    CHECK_THAT(c.round_trip_bps, WithinAbs(8.0 + 1.5 + 2.0, 1e-9));
+    CHECK_THAT(c.fee_bps_round_trip, WithinAbs(kTakerFeeBps * 2.0, 1e-9));
+    CHECK_THAT(c.spread_cost_bps, WithinAbs(3.0, 1e-9));
+    CHECK_THAT(c.round_trip_bps, WithinAbs(12.0 + 3.0 + 2.0, 1e-9));
 
-    // A resting entry must be cheaper than crossing for it -- if this ever
-    // inverts, the fee table or the leg model is wrong.
-    CHECK(c.round_trip_bps < compute_trade_cost(EntryType::market, realistic(3.0, 2.0)).round_trip_bps);
+    CHECK_THAT(c.round_trip_bps, WithinAbs(
+        compute_trade_cost(EntryType::market, realistic(3.0, 2.0)).round_trip_bps, 1e-9));
 }
 
 TEST_CASE("the spread is never charged one and a half times") {
@@ -86,7 +85,7 @@ TEST_CASE("a stop-market entry is a taker fill, not a maker one") {
     CHECK_THAT(stop.fee_bps_round_trip, WithinAbs(kTakerFeeBps * 2.0, 1e-9));
     CHECK_THAT(stop.round_trip_bps, WithinAbs(mkt.round_trip_bps, 1e-9));
 
-    // A stop-LIMIT rests once triggered, so it stays on the maker side.
+    // A triggered LIMIT can cross. No post-only authorization is in the proposal.
     CHECK_THAT(compute_trade_cost(EntryType::stop_limit, realistic(3.0, 2.0)).fee_bps_round_trip,
-               WithinAbs(kMakerFeeBps + kTakerFeeBps, 1e-9));
+               WithinAbs(kTakerFeeBps * 2.0, 1e-9));
 }

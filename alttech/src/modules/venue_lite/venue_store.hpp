@@ -75,9 +75,13 @@ enum class VenueScope { all_venues, references_only };
                                               int64_t bar_ms, const RefResult& res);
 
 // Persist a compact reference_lite microstructure vector for the 1m window.
+// DT-19: the committed values and validity are handed back so the same
+// vector is published (they are not recomputed for the message).
 [[nodiscard]] Result<void> write_venue_micro(persistence::PgPool& pool, const PairVenue& pv,
                                              int64_t bar_ms, int64_t feature_set_id,
-                                             const LiteContext& ctx, double close);
+                                             const LiteContext& ctx, double close,
+                                             std::vector<float>* out_values = nullptr,
+                                             std::vector<uint8_t>* out_validity = nullptr);
 
 // Upsert the evolving venue structure zone for one (venue, pair, kind).
 [[nodiscard]] Result<void> write_venue_zone(persistence::PgPool& pool, const PairVenue& pv,

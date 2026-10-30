@@ -1,10 +1,9 @@
 // Primary-venue microstructure module: trade and order-book features over
 // tumbling 1s / 5s / 15s / 30s / 1m windows.
 //
-// Every window is published live on NATS. Which windows are also persisted is a
-// deployment decision: sub-second vectors are an execution-timing signal whose
-// storage cost dominates the analytics budget, so the default persists the 15s,
-// 30s and 1m windows and leaves 1s and 5s live-only.
+// All five windows persist by default under bounded retention, before their
+// notification is delivered from the durable outbox. A deliberately omitted
+// window remains live-only and cannot claim historical train/serve coverage.
 //
 // The application owns PostgreSQL, NATS and process lifecycle; this module owns
 // only its calculation state and subscriptions. The same module drives the
@@ -12,6 +11,7 @@
 
 #include "alttech/application/module_supervisor.hpp"
 #include "venue_sweep.hpp"
+#include "../ofi/ofi_windows.hpp"
 #include "alttech/modules/microstructure.hpp"
 #include "alttech/common/backoff.hpp"
 #include "alttech/common/hash.hpp"
@@ -23,6 +23,7 @@
 #include "alttech/messaging/nats_client.hpp"
 #include "alttech/messaging/topology.hpp"
 #include "alttech/persistence/pg.hpp"
+#include "alttech/persistence/analytics_outbox.hpp"
 #include "alttech/persistence/txn_log.hpp"
 #include "alttech/time/time.hpp"
 
@@ -88,6 +89,12 @@ const std::vector<std::string>& micro_feature_names() {
     return names;
 }
 
+const std::vector<std::string>& ofi_feature_names() {
+    static const std::vector<std::string> names = {
+        "ofi_base", "ofi_depth_normalized", "ofi_event_count", "ofi_mean_depth_base"};
+    return names;
+}
+
 struct MicroTrade {
     int64_t ts_ms = 0;
     double price = 0;
@@ -138,6 +145,9 @@ struct InstrumentState {
 };
 
 struct MicroVector {
+    Venue venue = Venue::bitget;
+    bool ofi = false;
+    bool complete = true;
     std::string symbol;
     int64_t instrument_id = 0;
     std::string window_label;
@@ -213,6 +223,9 @@ public:
             joined += '\n';
         }
         schema_hash_ = sha256_hex(joined);
+        joined.clear();
+        for (const auto& name : ofi_feature_names()) joined += name + '\n';
+        ofi_schema_hash_ = sha256_hex(joined);
         book_page_size_ = static_cast<size_t>(
             config::opt_int(config, "book_poll_page_size", 50'000));
         book_max_pages_ = static_cast<size_t>(
@@ -221,7 +234,7 @@ public:
         store_batch_size_ = static_cast<size_t>(
             config::opt_int(config, "store_batch_size", 2'000));
         const std::string persisted =
-            config::opt_str(config, "persist_windows", "15s,30s,1m");
+            config::opt_str(config, "persist_windows", "1s,5s,15s,30s,1m");
         for (size_t begin = 0, end = 0; begin < persisted.size(); begin = end + 1) {
             end = persisted.find(',', begin);
             if (end == std::string::npos) end = persisted.size();
@@ -236,6 +249,9 @@ public:
         auto set_id = ensure_set();
         if (!set_id) return std::unexpected(set_id.error());
         set_id_ = *set_id;
+        auto ofi_set = ensure_set(true);
+        if (!ofi_set) return std::unexpected(ofi_set.error());
+        ofi_set_id_ = *ofi_set;
 
         std::vector<std::pair<int64_t, std::string>> instruments;
         auto result = pool_.with_txn([&](pqxx::work& txn) {
@@ -325,6 +341,40 @@ public:
         InstrumentState& state = *it->second;
         ++state.trades_seen;
         for (auto& window : state.windows) window.trades.push_back(converted);
+        return {};
+    }
+
+    Result<void> on_book_delta(const ::alttech::v1::Envelope& envelope) {
+        const auto venue = venue_from_id(static_cast<int32_t>(envelope.exchange()));
+        if (!venue || !is_reference(*venue) || !envelope.has_order_book_delta() ||
+            envelope.instrument_id() <= 0 || envelope.local_receive_time_ms() <= 0 ||
+            envelope.connection_id().empty()) {
+            return fail(ErrorCode::validation_error, "OFI requires identified reference-venue delta and receipt time");
+        }
+        const auto& delta = envelope.order_book_delta();
+        ofi::Event event;
+        event.connection = envelope.connection_id();
+        event.epoch = delta.book_epoch();
+        event.counter = delta.delta_counter();
+        // The family is explicitly receipt-windowed. Late exchange events
+        // cannot rewrite a vector that was already available to a decision.
+        event.received_ms = envelope.local_receive_time_ms();
+        if (delta.has_ofi_base() && delta.has_bbo_depth_base() &&
+            validate_wire_decimal(delta.ofi_base(), "ofi_base") &&
+            validate_wire_decimal(delta.bbo_depth_base(), "bbo_depth_base")) {
+            auto flow = decimal_to_double(messaging::from_proto(delta.ofi_base()), "ofi_base");
+            auto depth = decimal_to_double(messaging::from_proto(delta.bbo_depth_base()), "bbo_depth_base");
+            if (flow && depth && *depth > 0) {
+                event.flow_base = *flow;
+                event.depth_base = *depth;
+                event.available = true;
+            }
+        }
+        std::lock_guard lock(mu_);
+        if (!by_iid_.contains(envelope.instrument_id())) return {};
+        auto& state = ofi_states_[{venue_id(*venue), envelope.instrument_id()}];
+        state.symbol = envelope.exchange_symbol();
+        state.windows.add(event);
         return {};
     }
 
@@ -450,69 +500,95 @@ public:
         poll_books();
         {
             std::lock_guard lock(mu_);
+            for (auto& [key, state] : ofi_states_) {
+                for (const auto& window : state.windows.close(now_ms)) {
+                    MicroVector vector;
+                    vector.venue = static_cast<Venue>(key.first);
+                    vector.ofi = true;
+                    vector.complete = window.valid;
+                    vector.symbol = state.symbol;
+                    vector.instrument_id = key.second;
+                    vector.window_start_ms = window.start_ms;
+                    vector.span_ms = window.span_ms;
+                    vector.computed_at_ms = now_ms;
+                    for (const auto& spec : kWindows) if (spec.span_ms == window.span_ms) vector.window_label = spec.label;
+                    vector.values = {static_cast<float>(window.flow_base), static_cast<float>(window.depth_normalized),
+                                     static_cast<float>(window.updates), static_cast<float>(window.mean_depth_base)};
+                    vector.validity = {static_cast<uint8_t>(window.valid ? 0x0f : 0)};
+                    if (pending_store_.size() >= kMaxPendingWindows) { pending_store_.pop_front(); ++dropped_windows_; }
+                    pending_store_.push_back(std::move(vector));
+                }
+            }
             for (auto& state_ptr : states_) {
                 InstrumentState& state = *state_ptr;
                 for (size_t index = 0; index < std::size(kWindows); ++index) {
                     const auto& spec = kWindows[index];
                     WindowAccum& accum = state.windows[index];
-                    const int64_t window_start =
-                        (now_ms / spec.span_ms - 1) * spec.span_ms;
+                    const int64_t window_start = (now_ms / spec.span_ms) * spec.span_ms;
                     if (accum.start_ms == 0) {
                         accum.start_ms = window_start;
                         continue;
                     }
-                    if (window_start <= accum.start_ms) continue;
+                    // Process every completed bucket in order. Jumping the
+                    // cursor to wall time silently discarded intermediate
+                    // windows whenever a DB poll or publish delayed the tick.
+                    size_t closed_windows = 0;
+                    while (window_start > accum.start_ms && closed_windows++ < 128) {
 
-                    const int64_t closed_start = accum.start_ms;
-                    const int64_t closed_end = closed_start + spec.span_ms;
-                    std::vector<MicroTrade> trades_in;
-                    std::vector<MicroTrade> trades_rest;
-                    for (const auto& trade : accum.trades) {
-                        if (trade.ts_ms >= closed_start && trade.ts_ms < closed_end) {
-                            trades_in.push_back(trade);
-                        } else if (trade.ts_ms >= closed_end) {
-                            trades_rest.push_back(trade);
+                        const int64_t closed_start = accum.start_ms;
+                        const int64_t closed_end = closed_start + spec.span_ms;
+                        std::vector<MicroTrade> trades_in;
+                        std::vector<MicroTrade> trades_rest;
+                        for (const auto& trade : accum.trades) {
+                            if (trade.ts_ms >= closed_start && trade.ts_ms < closed_end) {
+                                trades_in.push_back(trade);
+                            } else if (trade.ts_ms >= closed_end) {
+                                trades_rest.push_back(trade);
+                            }
                         }
-                    }
-                    accum.trades = std::move(trades_rest);
+                        accum.trades = std::move(trades_rest);
 
-                    std::vector<BookSample> books_in;
-                    std::vector<BookSample> books_rest;
-                    for (const auto& book : accum.books) {
-                        if (book.ts_ms >= closed_start && book.ts_ms < closed_end) {
-                            books_in.push_back(book);
-                        } else if (book.ts_ms >= closed_end) {
-                            books_rest.push_back(book);
+                        std::vector<BookSample> books_in;
+                        std::vector<BookSample> books_rest;
+                        for (const auto& book : accum.books) {
+                            if (book.ts_ms >= closed_start && book.ts_ms < closed_end) {
+                                books_in.push_back(book);
+                            } else if (book.ts_ms >= closed_end) {
+                                books_rest.push_back(book);
+                            }
                         }
-                    }
-                    accum.books = std::move(books_rest);
+                        accum.books = std::move(books_rest);
 
-                    MicroVector vector =
-                        compute(state, spec, closed_start, trades_in, books_in, accum);
-                    vector.computed_at_ms = now_ms;
-                    accum.start_ms = window_start;
-                    if (spec.span_ms == 60'000) {
-                        state.cvd_dirty = true;
-                        ++state.cvd_generation;
-                    }
-                    // DB-first for persisted windows: they become publishable
-                    // only after store() commits. Live-only windows go straight
-                    // to the publication queue.
-                    if (persist_windows_.contains(vector.window_label)) {
-                        // Drop the oldest rather than grow without bound: the
-                        // newest windows are the ones still worth publishing,
-                        // and the database is the record of what was missed.
-                        if (pending_store_.size() >= kMaxPendingWindows) {
-                            pending_store_.pop_front();
-                            ++dropped_windows_;
+                        std::sort(trades_in.begin(), trades_in.end(), [](const auto& a, const auto& b) { return a.ts_ms < b.ts_ms; });
+                        std::sort(books_in.begin(), books_in.end(), [](const auto& a, const auto& b) { return a.ts_ms < b.ts_ms; });
+
+                        MicroVector vector =
+                            compute(state, spec, closed_start, trades_in, books_in, accum);
+                        vector.computed_at_ms = now_ms;
+                        accum.start_ms = closed_end;
+                        if (spec.span_ms == 60'000) {
+                            state.cvd_dirty = true;
+                            ++state.cvd_generation;
                         }
-                        pending_store_.push_back(std::move(vector));
-                    } else {
-                        if (pending_publish_.size() >= kMaxPendingWindows) {
-                            pending_publish_.pop_front();
-                            ++dropped_windows_;
+                        // DB-first for persisted windows: they become publishable
+                        // only after store() commits. Live-only windows go straight
+                        // to the publication queue.
+                        if (persist_windows_.contains(vector.window_label)) {
+                            // Drop the oldest rather than grow without bound: the
+                            // newest windows are the ones still worth publishing,
+                            // and the database is the record of what was missed.
+                            if (pending_store_.size() >= kMaxPendingWindows) {
+                                pending_store_.pop_front();
+                                ++dropped_windows_;
+                            }
+                            pending_store_.push_back(std::move(vector));
+                        } else {
+                            if (pending_publish_.size() >= kMaxPendingWindows) {
+                                pending_publish_.pop_front();
+                                ++dropped_windows_;
+                            }
+                            pending_publish_.push_back(std::move(vector));
                         }
-                        pending_publish_.push_back(std::move(vector));
                     }
                 }
             }
@@ -608,14 +684,18 @@ public:
     }
 
 private:
-    Result<int64_t> ensure_set() {
+    Result<int64_t> ensure_set(bool ofi = false) {
+        const std::string name = ofi ? "book_ofi_receipt" : kMicroSetName;
+        const std::string profile = ofi ? "sequence_validated_delta" : kMicroProfile;
+        const std::string engine = ofi ? "alttech-ofi-1" : kMicroEngineVersion;
+        const std::string& hash = ofi ? ofi_schema_hash_ : schema_hash_;
         int64_t id = 0;
         std::string existing_hash;
         auto result = pool_.with_txn([&](pqxx::work& txn) {
             const auto rows = txn.exec_params(
                 "SELECT id, schema_hash FROM alttech.feature_set_versions "
                 "WHERE name = $1 AND version = $2",
-                std::string(kMicroSetName), kMicroSetVersion);
+                name, kMicroSetVersion);
             if (!rows.empty()) {
                 id = rows[0][0].as<int64_t>();
                 existing_hash = rows[0][1].as<std::string>();
@@ -626,10 +706,9 @@ private:
                 "INSERT INTO alttech.feature_set_versions "
                 "(name, version, scope, profile, engine_version, schema_hash, frozen) "
                 "VALUES ($1, $2, 'VENUE', $3, $4, $5, true) RETURNING id",
-                std::string(kMicroSetName), kMicroSetVersion, std::string(kMicroProfile),
-                std::string(kMicroEngineVersion), schema_hash_);
+                name, kMicroSetVersion, profile, engine, hash);
             id = inserted[0][0].as<int64_t>();
-            const auto& names = micro_feature_names();
+            const auto& names = ofi ? ofi_feature_names() : micro_feature_names();
             for (size_t index = 0; index < names.size(); ++index) {
                 const auto definition = txn.exec_params(
                     "INSERT INTO alttech.feature_definitions (name, family, scope) "
@@ -650,7 +729,7 @@ private:
             }
         });
         if (!result) return std::unexpected(result.error());
-        if (!existing_hash.empty() && existing_hash != schema_hash_) {
+        if (!existing_hash.empty() && existing_hash != hash) {
             return fail(ErrorCode::config_error,
                         "micro-trade set is frozen but its catalog changed");
         }
@@ -719,21 +798,23 @@ private:
         }
         const double vwap = volume > 0 ? notional / volume : 0;
 
-        put(static_cast<double>(count), true);
-        put(static_cast<double>(count) / seconds, true);
-        put(buy_volume, true);
-        put(sell_volume, true);
+        // An ephemeral stream with no event does not prove a healthy zero.
+        // Until a source coverage certificate is present, absence stays NA.
+        put(static_cast<double>(count), count > 0);
+        put(static_cast<double>(count) / seconds, count > 0);
+        put(buy_volume, count > 0);
+        put(sell_volume, count > 0);
         put(volume > 0 ? delta / volume : 0, volume > 0);
-        put(delta, true);
-        put(delta, true);
-        put(state.cvd, true);
+        put(delta, count > 0);
+        put(delta, count > 0);
+        put(state.cvd, count > 0);
         put(count > 0 ? volume / static_cast<double>(count) : 0, count > 0);
         put(median, count > 0);
         put(max_size, count > 0);
         put(count > 0 ? static_cast<double>(large) / static_cast<double>(count) : 0,
             count > 0);
-        put(static_cast<double>(buys), true);
-        put(static_cast<double>(count - buys), true);
+        put(static_cast<double>(buys), count > 0);
+        put(static_cast<double>(count - buys), count > 0);
         put(vwap, volume > 0);
         put(volume > 0 && !trades.empty() && vwap > 0
                 ? (trades.back().price - vwap) / vwap
@@ -790,17 +871,18 @@ private:
             std::string sql =
                 "INSERT INTO alttech.venue_microstructure_vectors "
                 "(part_class, exchange_id, canonical_pair_id, window_label, window_start, "
-                "feature_set_version_id, profile, values, validity_bitmap, status, "
+                "feature_set_version_id, profile, values, validity_bitmap, status, venue_quality, "
                 "engine_version, computed_at) VALUES ";
             bool first = true;
             for (const auto& row : rows) {
                 sql += first ? "(" : ",(";
                 first = false;
-                sql += txn.quote(std::string(part_class_for(row.span_ms))) + ",1," +
+                sql += txn.quote(std::string(is_reference(row.venue) ? "ref_1m" : part_class_for(row.span_ms))) + "," +
+                       std::to_string(venue_id(row.venue)) + "," +
                        std::to_string(row.instrument_id) + "," +
                        txn.quote(row.window_label) + ",to_timestamp(" +
                        std::to_string(row.window_start_ms) + "::bigint / 1000.0)," +
-                       std::to_string(set_id_) + "," + txn.quote(std::string(kMicroProfile)) +
+                       std::to_string(row.ofi ? ofi_set_id_ : set_id_) + "," + txn.quote(std::string(row.ofi ? "sequence_validated_delta" : kMicroProfile)) +
                        ",'{";
                 char buffer[32];
                 for (size_t index = 0; index < row.values.size(); ++index) {
@@ -815,62 +897,89 @@ private:
                     sql += digits[byte >> 4U];
                     sql += digits[byte & 0x0FU];
                 }
-                sql += "'::bytea,'VALID'," +
-                       txn.quote(std::string(kMicroEngineVersion)) + ",to_timestamp(" +
+                sql += "'::bytea," + txn.quote(std::string(row.complete ? "VALID" : "INCOMPLETE_INPUT")) + "," +
+                       txn.quote(std::string(row.complete ? "VALID" : "DESYNCED")) + "," +
+                       txn.quote(std::string(row.ofi ? "alttech-ofi-1" : kMicroEngineVersion)) + ",to_timestamp(" +
                        std::to_string(row.computed_at_ms) + "::bigint / 1000.0))";
             }
             sql +=
                 " ON CONFLICT (part_class, exchange_id, canonical_pair_id, window_label, "
                 "window_start, feature_set_version_id) DO UPDATE SET values = EXCLUDED.values, "
                 "validity_bitmap = EXCLUDED.validity_bitmap, status = EXCLUDED.status, "
+                "venue_quality = EXCLUDED.venue_quality, "
                 "engine_version = EXCLUDED.engine_version, "
                 "computed_at = EXCLUDED.computed_at";
             txn.exec(sql);
+            for (const auto& row : rows) {
+                const auto envelope = event_for(row);
+                persistence::enqueue_analytics(txn, envelope.message_id(),
+                    messaging::topology::venue_microfeature_subject(row.venue, row.symbol, row.window_label),
+                    messaging::serialize(envelope));
+            }
         });
+    }
+
+    ::alttech::v1::Envelope event_for(const MicroVector& vector) {
+        messaging::EnvelopeMeta meta;
+        meta.event_type = "microstructure.vector";
+        meta.venue = vector.venue;
+        meta.instrument_id = vector.instrument_id;
+        meta.exchange_symbol = vector.symbol;
+        meta.exchange_timestamp_ms = vector.window_start_ms;
+        meta.source_service = "alttech-service";
+        meta.message_id = "mf:" + vector.symbol + ":" + vector.window_label + ":" +
+                          std::to_string(vector.window_start_ms);
+        auto envelope = messaging::make_envelope(meta);
+        envelope.set_quality_state(vector.complete ? ::alttech::v1::QUALITY_STATE_VALID : ::alttech::v1::QUALITY_STATE_DESYNCED);
+        if (vector.ofi) {
+            envelope.set_canonical_pair_id(vector.instrument_id);
+            envelope.set_message_id("ofi:" + std::string(venue_code(vector.venue)) + ":" +
+                std::to_string(vector.instrument_id) + ":" + vector.window_label + ":" + std::to_string(vector.window_start_ms));
+            auto* payload = envelope.mutable_venue_microstructure_vector();
+            payload->set_scope(::alttech::v1::ANALYTICS_SCOPE_VENUE);
+            payload->set_exchange(envelope.exchange());
+            payload->set_canonical_pair_id(vector.instrument_id);
+            payload->set_instrument_id(vector.instrument_id);
+            payload->set_window_label(vector.window_label);
+            payload->set_window_start_ms(vector.window_start_ms);
+            payload->set_profile("sequence_validated_delta");
+            payload->set_feature_set_name("book_ofi_receipt");
+            payload->set_feature_set_version(1);
+            payload->set_schema_hash(ofi_schema_hash_);
+            payload->set_engine_version("alttech-ofi-1");
+            for (float value : vector.values) payload->add_values(value);
+            payload->set_validity_bitmap(std::string(vector.validity.begin(), vector.validity.end()));
+            payload->set_status(vector.complete ? ::alttech::v1::ANALYTICS_VECTOR_STATUS_VALID : ::alttech::v1::ANALYTICS_VECTOR_STATUS_INCOMPLETE_INPUT);
+            payload->set_venue_quality(envelope.quality_state());
+            payload->set_computed_at_ms(vector.computed_at_ms);
+            return envelope;
+        }
+        auto* payload = envelope.mutable_microstructure_vector();
+        payload->set_window_label(vector.window_label);
+        payload->set_window_start_ms(vector.window_start_ms);
+        payload->set_feature_set_name(kMicroSetName);
+        payload->set_feature_set_version(kMicroSetVersion);
+        payload->set_schema_hash(schema_hash_);
+        payload->set_engine_version(kMicroEngineVersion);
+        for (const float value : vector.values) payload->add_values(value);
+        payload->set_validity_bitmap(
+            std::string(vector.validity.begin(), vector.validity.end()));
+        payload->set_status(::alttech::v1::MICROSTRUCTURE_STATUS_VALID);
+        payload->set_computed_at_ms(vector.computed_at_ms);
+
+        return envelope;
     }
 
     bool publish(const MicroVector& vector) noexcept {
         try {
-            messaging::EnvelopeMeta meta;
-            meta.event_type = "microstructure.vector";
-            meta.instrument_id = vector.instrument_id;
-            meta.exchange_symbol = vector.symbol;
-            meta.exchange_timestamp_ms = vector.window_start_ms;
-            meta.source_service = "alttech-service";
-            meta.message_id = "mf:" + vector.symbol + ":" + vector.window_label + ":" +
-                              std::to_string(vector.window_start_ms);
-            auto envelope = messaging::make_envelope(meta);
-            auto* payload = envelope.mutable_microstructure_vector();
-            payload->set_window_label(vector.window_label);
-            payload->set_window_start_ms(vector.window_start_ms);
-            payload->set_feature_set_name(kMicroSetName);
-            payload->set_feature_set_version(kMicroSetVersion);
-            payload->set_schema_hash(schema_hash_);
-            payload->set_engine_version(kMicroEngineVersion);
-            for (const float value : vector.values) payload->add_values(value);
-            payload->set_validity_bitmap(
-                std::string(vector.validity.begin(), vector.validity.end()));
-            payload->set_status(::alttech::v1::MICROSTRUCTURE_STATUS_VALID);
-            payload->set_computed_at_ms(vector.computed_at_ms);
-
-            const std::string subject = messaging::topology::venue_microfeature_subject(
-                Venue::bitget, vector.symbol, vector.window_label);
-            auto result = nats_.js_publish(subject, messaging::serialize(envelope),
-                                           envelope.message_id(), 5'000);
-            if (!result) {
-                log::warn("microfeature_publish_failed",
-                          {{"symbol", vector.symbol},
-                           {"window", vector.window_label},
-                           {"message", result.error().message}});
-                return false;
-            }
-            return true;
+            const auto envelope = event_for(vector);
+            return static_cast<bool>(nats_.js_publish(messaging::topology::venue_microfeature_subject(
+                vector.venue, vector.symbol, vector.window_label), messaging::serialize(envelope), envelope.message_id(), 500));
         } catch (const std::exception& error) {
             log::warn("microfeature_publish_exception", {{"message", error.what()}});
             return false;
         } catch (...) {
-            log::warn("microfeature_publish_exception",
-                      {{"message", "non-standard exception"}});
+            log::warn("microfeature_publish_exception", {{"message", "non-standard exception"}});
             return false;
         }
     }
@@ -898,10 +1007,13 @@ private:
                 for (size_t index = 0; index < count; ++index) {
                     pending_store_.pop_front();
                 }
-                for (auto& row : batch) pending_publish_.push_back(std::move(row));
+                // Durable outbox owns publication and restart replay for committed rows.
             }
         }
         flush_publications(now_ms, force);
+        if (auto drained = persistence::drain_analytics_outbox(pool_, nats_); !drained) {
+            log::warn("micro_outbox_drain_failed", {{"message", drained.error().message}});
+        }
     }
 
     void flush_publications(int64_t now_ms, bool force) {
@@ -925,7 +1037,11 @@ private:
     persistence::PgPool& pool_;
     messaging::NatsClient& nats_;
     std::string schema_hash_;
+    std::string ofi_schema_hash_;
     int64_t set_id_ = 0;
+    int64_t ofi_set_id_ = 0;
+    struct OfiState { std::string symbol; ofi::Windows windows; };
+    std::map<std::pair<int32_t, int64_t>, OfiState> ofi_states_;
 
     std::mutex mu_;
     std::vector<std::unique_ptr<InstrumentState>> states_;
@@ -1007,7 +1123,8 @@ Result<void> run_microstructure(const YAML::Node& service_config,
                 "AND to_regclass('market_orderbook_snapshots') IS NOT NULL "
                 "AND to_regclass('alttech.feature_set_versions') IS NOT NULL "
                 "AND to_regclass('alttech.venue_microstructure_vectors') IS NOT NULL "
-                "AND to_regclass('alttech.module_checkpoints') IS NOT NULL");
+                "AND to_regclass('alttech.module_checkpoints') IS NOT NULL "
+                "AND to_regclass('alttech.analytics_outbox') IS NOT NULL");
             if (!row[0].as<bool>()) {
                 throw std::runtime_error(
                     "required market-data or alttech microstructure schema is missing");
@@ -1088,6 +1205,21 @@ Result<void> run_microstructure(const YAML::Node& service_config,
                        {{"message", subscription.error().message}});
             return fail_module(subscription.error());
         }
+
+        auto book_subscription = nats.subscribe("md.*.*.book.delta", [&](messaging::Msg message) noexcept {
+            try {
+                auto envelope = messaging::parse_envelope(message.data());
+                if (!envelope) return;
+                if (auto accepted = service.on_book_delta(*envelope); !accepted) {
+                    log::warn("ofi_delta_rejected", {{"message", accepted.error().message}});
+                }
+            } catch (const std::exception& error) {
+                log::warn("ofi_callback_exception", {{"message", error.what()}});
+            } catch (...) {
+                log::warn("ofi_callback_exception", {{"message", "non-standard exception"}});
+            }
+        });
+        if (!book_subscription) return fail_module(book_subscription.error());
 
         {
             std::string persisted;

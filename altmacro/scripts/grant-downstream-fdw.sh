@@ -87,7 +87,7 @@ psql_admin -d "$CONSUMER_DB" <<SQL
 SET ROLE ${CONSUMER_ROLE};
 IMPORT FOREIGN SCHEMA public
     LIMIT TO (macro_instruments, macro_providers, macro_instrument_sources,
-              macro_price_bars, macro_reference_values, macro_events,
+              macro_price_bars, macro_reference_values, macro_reference_revisions, macro_events,
               macro_series_gaps)
     FROM SERVER altmacro_srv INTO ${SCHEMA};
 RESET ROLE;

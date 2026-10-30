@@ -508,24 +508,29 @@ Result<int64_t> JournalStore::sweep_expired(int64_t now_ms, int64_t max_signal_a
         // The age cut is expressed against created_at_ms (T0), not against
         // arrival: a signal that sat in a stopped consumer for an hour is an
         // hour old whatever moment this service first saw it.
+        // EX-11 (2026-10-30): the state each signal left is part of the
+        // record -- never delivered (JOURNALED/QUEUED) is a different truth
+        // from sent and never acknowledged (SENT).
         const auto res = txn.exec_params(
-            "UPDATE altsignalgateway.signal_journal"
+            "WITH due AS (SELECT signal_id, delivery_state AS prior_state FROM altsignalgateway.signal_journal"
+            "  WHERE delivery_state IN ('JOURNALED','QUEUED','SENT')"
+            "    AND (expires_at_ms <= $1 OR ($2 > 0 AND created_at_ms < $1 - $2)) FOR UPDATE)"
+            " UPDATE altsignalgateway.signal_journal j"
             "   SET delivery_state = 'EXPIRED'"
-            " WHERE delivery_state IN ('JOURNALED','QUEUED','SENT')"
-            "   AND (expires_at_ms <= $1"
-            "        OR ($2 > 0 AND created_at_ms < $1 - $2))"
-            " RETURNING signal_id, sequence, expires_at_ms <= $1 AS by_validity",
+            "  FROM due WHERE j.signal_id = due.signal_id"
+            " RETURNING j.signal_id, j.sequence, j.expires_at_ms <= $1 AS by_validity, due.prior_state",
             now_ms, max_signal_age_ms);
         swept = static_cast<int64_t>(res.size());
         for (const auto& row : res) {
+            const auto prior = row[3].as<std::string>();
+            const std::string why = std::string(row[2].as<bool>() ? "validity window closed before acknowledgement"
+                                                                  : "older than the configured max_signal_age_sec") +
+                                    (prior == "SENT" ? "; sent, never acknowledged" : "; never delivered (" + prior + ")");
             txn.exec_params(
                 "INSERT INTO altsignalgateway.delivery_events"
                 " (signal_id, sequence, event, detail, occurred_at_ms)"
                 " VALUES ($1,$2,'EXPIRED',$3,$4)",
-                row[0].as<std::string>(), row[1].as<int64_t>(),
-                row[2].as<bool>() ? "validity window closed before acknowledgement"
-                                  : "older than the configured max_signal_age_sec",
-                now_ms);
+                row[0].as<std::string>(), row[1].as<int64_t>(), why, now_ms);
         }
     });
     if (!r) return std::unexpected(r.error());
@@ -778,6 +783,7 @@ Result<domain::MacroSnapshot> JournalStore::load_macro_asof(int64_t t0_ms, int64
             "  JOIN " + schema + ".feature_set_versions fs ON fs.id = v.feature_set_version_id"
             " WHERE v.timeframe = '1m' AND fs.scope = 'GLOBAL'"
             "   AND v.bar_open_time <= to_timestamp($1::bigint / 1000.0)"
+            "   AND v.computed_at <= to_timestamp($1::bigint / 1000.0)"
             "   AND v.bar_open_time >  to_timestamp(($1::bigint - $2::bigint) / 1000.0)"
             " ORDER BY v.bar_open_time DESC LIMIT 1",
             t0_ms, max_age_ms);

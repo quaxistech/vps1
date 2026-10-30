@@ -26,14 +26,18 @@ constexpr int64_t kNow = 1'000'050;
 constexpr int64_t kMin = 60'000;
 }
 
-TEST_CASE("a setup's horizon maps to the nearest model horizon on a log scale", "[policy]") {
-    CHECK(evaluation_horizon_minutes(20 * kMin) == 15);
-    CHECK(evaluation_horizon_minutes(30 * kMin) == 15);
-    CHECK(evaluation_horizon_minutes(31 * kMin) == 60);
-    CHECK(evaluation_horizon_minutes(90 * kMin) == 60);
-    CHECK(evaluation_horizon_minutes(120 * kMin) == 60);
-    CHECK(evaluation_horizon_minutes(121 * kMin) == 240);
-    CHECK(evaluation_horizon_minutes(6 * 60 * kMin) == 240);
+TEST_CASE("a setup requires its exact supported payoff horizon", "[policy][horizon]") {
+    CHECK(evaluation_horizon_minutes(15 * kMin) == 15);
+    CHECK(evaluation_horizon_minutes(60 * kMin) == 60);
+    CHECK(evaluation_horizon_minutes(240 * kMin) == 240);
+    for (const auto duration : {int64_t{0}, int64_t{-1}, 15 * kMin + 1, 20 * kMin,
+                               90 * kMin, 180 * kMin, 480 * kMin, 48 * 60 * kMin}) {
+        CHECK(evaluation_horizon_minutes(duration) == 0);
+    }
+    const auto decision = evaluate_economics(Side::long_, 480 * kMin, make_ctx(), kNow, {});
+    CHECK(decision.state == EconState::model_unavailable);
+    CHECK(decision.reason_code == "PAYOFF_HORIZON_UNSUPPORTED");
+    CHECK_FALSE(decision.actionable());
 }
 
 TEST_CASE("LONG and SHORT read their own side of the estimate", "[policy]") {
@@ -80,6 +84,16 @@ TEST_CASE("every way of not having a usable model is its own refusal", "[policy]
         ctx.forecasts[240].bar_open_time_ms = kNow - 10 * kMin;   // closed 9 minutes ago
         const auto d = evaluate_economics(Side::long_, 4 * 60 * kMin, ctx, kNow, {});
         CHECK(d.state == EconState::model_stale);
+    }
+    SECTION("future bar cannot pass the age subtraction") {
+        ctx.forecasts[240].bar_open_time_ms = kNow + kMin;
+        CHECK(evaluate_economics(Side::long_, 4 * 60 * kMin, ctx, kNow, {}).state ==
+              EconState::model_stale);
+    }
+    SECTION("future forecast computation is unavailable") {
+        ctx.forecasts[240].computed_at_ms = kNow + 1;
+        CHECK(evaluate_economics(Side::long_, 4 * 60 * kMin, ctx, kNow, {}).state ==
+              EconState::model_stale);
     }
     SECTION("not an econ estimate") {
         ctx.forecasts[240].econ = false;

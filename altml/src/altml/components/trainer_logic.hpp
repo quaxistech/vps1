@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -454,6 +455,7 @@ struct AlignedSource {
     int exchange_id = 1;
     std::string timeframe = "1m";
     int span_minutes = 1;       // how long a bar on this grid lasts
+    int64_t span_milliseconds = 0; // explicit sub-minute window; never rounded to1m
     // 0 = no lower bound at all: the newest bar that has closed by T0 is
     // taken however old it is. It does NOT mean 'only the bar closing
     // exactly at T0' -- aligned_source_sql() emits the lower bound solely
@@ -488,6 +490,8 @@ struct AlignedSource {
     // same way or the served block would be a permutation of the trained one.
     std::vector<std::string> projection;
     std::vector<size_t> positions;
+    size_t published_width = 0;
+    std::string engine_version; // optional explicit producer-method pin in the model recipe
     // Set when this source is the SAME observation for every target, rather
     // than one observation per instrument.
     //
@@ -499,6 +503,16 @@ struct AlignedSource {
     std::optional<int64_t> pinned_instrument_id;
     std::string alias = "s0";
 };
+
+[[nodiscard]] inline int64_t source_span_ms(const AlignedSource& src) {
+    return src.span_milliseconds > 0 ? src.span_milliseconds :
+           static_cast<int64_t>(src.span_minutes) * 60'000;
+}
+
+[[nodiscard]] inline std::string source_span_interval(const AlignedSource& src) {
+    return src.span_milliseconds > 0 ? std::to_string(src.span_milliseconds) + " milliseconds" :
+                                      std::to_string(src.span_minutes) + " minutes";
+}
 
 // Comma-separated version list for the SQL ARRAY literal. Falls back to the
 // named version alone, so a source is never silently unfiltered.
@@ -562,10 +576,11 @@ struct AlignedSource {
         //
         // `a + i <= b` and `a <= b - i` are the same set of rows.
         "AND " + a + "_i.bar_open_time <= f.bar_open_time + interval '1 minute'"
-        " - interval '" + std::to_string(src.span_minutes) + " minutes' ";
+        " - interval '" + source_span_interval(src) + "' ";
+    if (!src.engine_version.empty()) sql += "AND " + a + "_i.engine_version = '" + src.engine_version + "' ";
     if (src.freshness_minutes > 0) {
         sql += "AND " + a + "_i.bar_open_time >= f.bar_open_time + interval '1 minute'"
-               " - interval '" + std::to_string(src.span_minutes) + " minutes'"
+               " - interval '" + source_span_interval(src) + "'"
                " - interval '" + std::to_string(src.freshness_minutes) + " minutes' ";
     }
     sql += "ORDER BY " + a + "_i.bar_open_time DESC LIMIT 1) " + a + " ON true ";
@@ -582,7 +597,7 @@ struct AlignedSource {
     const std::string a = src.alias;
     std::string sql =
         "LEFT JOIN LATERAL (SELECT " + a + "_i.values AS values, " + a +
-        "_i.validity_bitmap AS bmp FROM altml.feature_vectors " + a + "_i "
+        "_i.validity_bitmap AS bmp FROM altml.econ_feature_vectors " + a + "_i "
         "WHERE " + a + "_i.exchange_id = " + std::to_string(src.exchange_id) + " "
         "AND " + a + "_i.instrument_id = " +
             (src.pinned_instrument_id.has_value() ? std::to_string(*src.pinned_instrument_id)
@@ -592,14 +607,23 @@ struct AlignedSource {
         "AND " + a + "_i.feature_set_version = ANY(ARRAY[" + version_list(src) + "]) "
         "AND " + a + "_i.quality_status = 'VALID' "
         "AND " + a + "_i.bar_open_time <= f.bar_open_time + interval '1 minute'"
-        " - interval '" + std::to_string(src.span_minutes) + " minutes' ";
+        " - interval '" + source_span_interval(src) + "' ";
+    if (src.published_width > 0) {
+        sql += "AND cardinality(" + a + "_i.values) = " + std::to_string(src.published_width) + " ";
+    }
+    if (!src.engine_version.empty()) sql += "AND " + a + "_i.engine_version = '" + src.engine_version + "' ";
     if (src.freshness_minutes > 0) {
         sql += "AND " + a + "_i.bar_open_time >= f.bar_open_time + interval '1 minute'"
-               " - interval '" + std::to_string(src.span_minutes) + " minutes'"
+               " - interval '" + source_span_interval(src) + "'"
                " - interval '" + std::to_string(src.freshness_minutes) + " minutes' ";
     }
+    // Receipt is an independent dependency clock: a value computed earlier
+    // but delivered/backfilled after the target was received was unavailable
+    // to that decision. Never reconstruct live availability from event time.
     sql += "AND " + a + "_i.computed_at <= f.computed_at "
-           "ORDER BY " + a + "_i.bar_open_time DESC, " + a + "_i.computed_at DESC LIMIT 1) " +
+           "AND " + a + "_i.received_at <= f.received_at "
+           "ORDER BY " + a + "_i.bar_open_time DESC, " + a + "_i.computed_at DESC, " +
+           a + "_i.bar_revision DESC, " + a + "_i.received_at DESC LIMIT 1) " +
            a + " ON true ";
     return sql;
 }
@@ -630,37 +654,69 @@ struct AlignedSource {
     // "venue:grid:freshness" or "venue:grid:freshness:set:set_version".
     // The short form means talib-core:1, which is what every source was before
     // sets other than talib-core could be read.
+    std::vector<std::string_view> parts;
+    size_t start = 0;
+    for (;;) {
+        const auto colon = spec.find(':', start);
+        parts.emplace_back(std::string_view(spec).substr(start,
+            colon == std::string::npos ? colon : colon - start));
+        if (colon == std::string::npos) break;
+        start = colon + 1;
+    }
+    const auto matched = parts.size();
+    if (matched != 3 && matched != 5 && matched != 6 && matched != 7) return std::nullopt;
+    const auto number = [](std::string_view text, auto& value) {
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        return !text.empty() && parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
+    };
     int venue = 0, fresh = 0, set_version = 1;
-    long long pinned = -1;
-    char tf_buf[16] = {0};
-    char set_buf[64] = {0};
-    // A sixth field pins the instrument: the source is then the same
-    // observation for every target rather than one per instrument.
-    const int matched = std::sscanf(spec.c_str(), "%d:%15[^:]:%d:%63[^:]:%d:%lld", &venue, tf_buf,
-                                    &fresh, set_buf, &set_version, &pinned);
-    if (matched != 3 && matched != 5 && matched != 6) return std::nullopt;
-    const std::string tf(tf_buf);
+    int64_t pinned = -1;
+    if (!number(parts[0], venue) || !number(parts[2], fresh)) return std::nullopt;
+    if (matched >= 5 && !number(parts[4], set_version)) return std::nullopt;
+    if (matched >= 6 && !(matched == 7 && parts[5] == "-") && !number(parts[5], pinned)) return std::nullopt;
+    const std::string tf(parts[1]);
     const auto span = grid_span_minutes(tf);
+    int64_t fast_span_ms = 0;
+    if (tf == "1s") fast_span_ms = 1'000;
+    else if (tf == "5s") fast_span_ms = 5'000;
+    else if (tf == "15s") fast_span_ms = 15'000;
+    else if (tf == "30s") fast_span_ms = 30'000;
     // venue 0 is the cross-venue consensus: it belongs to no exchange, is keyed
     // by canonical pair -- the same instrument_id the archive uses for every
     // venue -- and is archived with exchange_id 0. It is a real observation, not
     // an unknown venue, so it is admitted here and nowhere else.
-    if (!span || venue < 0 || venue > 4 || fresh < 0) return std::nullopt;
+    if ((!span && fast_span_ms == 0) || venue < 0 || venue > 4 || fresh < 0) return std::nullopt;
     AlignedSource src;
     src.exchange_id = venue;
     src.timeframe = tf;
-    src.span_minutes = *span;
+    src.span_minutes = span.value_or(0);
+    src.span_milliseconds = fast_span_ms;
     src.freshness_minutes = fresh;
     if (matched >= 5) {
         if (set_version < 1) return std::nullopt;
-        src.feature_set = set_buf;
+        src.feature_set = parts[3];
         src.feature_set_version = set_version;
-        if (src.feature_set.empty()) return std::nullopt;
+        if (src.feature_set.empty() || src.feature_set.size() > 63 ||
+            !std::all_of(src.feature_set.begin(), src.feature_set.end(), [](unsigned char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '_' || c == '-';
+            })) return std::nullopt;
     }
-    if (matched == 6) {
+    if (matched >= 6 && parts[5] != "-") {
         if (pinned < 0) return std::nullopt;
         src.pinned_instrument_id = static_cast<int64_t>(pinned);
     }
+    if (matched == 7) {
+        src.engine_version = parts[6];
+        if (src.engine_version.empty() || src.engine_version.size() > 80 ||
+            !std::all_of(src.engine_version.begin(), src.engine_version.end(), [](unsigned char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+            })) return std::nullopt;
+    }
+    if (fast_span_ms > 0 && src.feature_set != "bitget_micro" &&
+        src.feature_set != "reference_lite_micro" && src.feature_set != "book_ofi_receipt") return std::nullopt;
+    if (src.feature_set == "book_ofi_receipt" && (venue < 2 || set_version != 1)) return std::nullopt;
     // The per-venue indicator set has no cross-venue edition, and the consensus
     // set has no per-venue edition. Either mix-up would join a set that does not
     // exist and yield a column of NULLs that looks like a quiet market.
@@ -689,7 +745,10 @@ struct AlignedSource {
     // rows where training joined a single global series.
     if (src.pinned_instrument_id.has_value()) {
         out += ":" + std::to_string(*src.pinned_instrument_id);
+    } else if (!src.engine_version.empty()) {
+        out += ":-";
     }
+    if (!src.engine_version.empty()) out += ":" + src.engine_version;
     return out;
 }
 
@@ -759,13 +818,28 @@ struct AlignedSource {
                                                      int64_t source_bar_open_ms,
                                                      int64_t t0_ms) noexcept {
     constexpr int64_t kMinuteMs = 60'000;
-    const int64_t closes_at = source_bar_open_ms + static_cast<int64_t>(src.span_minutes) * kMinuteMs;
+    const auto span_ms = source_span_ms(src);
+    if (span_ms <= 0 || source_bar_open_ms < 0 ||
+        source_bar_open_ms > std::numeric_limits<int64_t>::max() - span_ms) return false;
+    const int64_t closes_at = source_bar_open_ms + span_ms;
     if (closes_at > t0_ms) return false;
     if (src.freshness_minutes > 0 &&
         closes_at < t0_ms - static_cast<int64_t>(src.freshness_minutes) * kMinuteMs) {
         return false;
     }
     return true;
+}
+
+// The online half of aligned_source_sql_pit. Source computation and receipt
+// must both precede the corresponding target clocks; neither SELECT time nor
+// a republished envelope can make a historical dependency available sooner.
+[[nodiscard]] inline bool aligned_observation_usable_pit(const AlignedSource& src,
+    int64_t source_bar_open_ms, int64_t source_computed_ms, int64_t source_received_ms,
+    int64_t t0_ms, int64_t target_computed_ms, int64_t target_received_ms) noexcept {
+    return source_bar_open_ms >= 0 && source_computed_ms > 0 && source_received_ms > 0 &&
+           target_computed_ms > 0 && target_received_ms > 0 &&
+           source_computed_ms <= target_computed_ms && source_received_ms <= target_received_ms &&
+           aligned_observation_usable(src, source_bar_open_ms, t0_ms);
 }
 
 // -------------------------------------------------- fold-local selection

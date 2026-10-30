@@ -64,6 +64,8 @@ public:
     };
     [[nodiscard]] static Result<std::vector<CsvPoint>>
     parse_csv(const std::string& body, std::string* out_value_column);
+    // A conservative availability bound, never an asserted release instant.
+    [[nodiscard]] static Result<int64_t> date_only_vintage_bound(const std::string& date);
 
 private:
     ProviderMetadata meta_;

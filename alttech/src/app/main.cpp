@@ -1,4 +1,5 @@
 #include "alttech/application/module_supervisor.hpp"
+#include "alttech/application/module_inventory.hpp"
 #include "alttech/config/analytics_config.hpp"
 #include "alttech/modules/cross_venue.hpp"
 #include "alttech/modules/macro.hpp"
@@ -23,9 +24,7 @@
 
 namespace {
 
-using Runner = alttech::Result<void> (*)(const YAML::Node&, alttech::persistence::PgPool&,
-                                     alttech::messaging::NatsClient&,
-                                     alttech::application::ModuleSupervisor&);
+using Runner = alttech::application::ModuleRunner;
 
 void run_guarded(std::string_view name, Runner runner, const YAML::Node& configuration,
                  alttech::persistence::PgPool& database, alttech::messaging::NatsClient& messaging,
@@ -76,31 +75,23 @@ int main(int argc, char** argv) {
     alttech::persistence::PgPool database(context->common.postgres_dsn,
                                       configuration->postgres_pool_size,
                                       configuration->postgres_statement_timeout_ms);
-    // Five supervised in-process modules: feature, microstructure, structure
-    // and regime for the primary venue and the per-venue sweeps they drive,
-    // plus the cross-venue module.
-    alttech::application::ModuleSupervisor supervisor(6);
+    const auto inventory = alttech::application::module_inventory(*configuration);
+    alttech::application::ModuleSupervisor supervisor(inventory.size());
     std::vector<std::thread> modules;
-    modules.reserve(5);
+    modules.reserve(inventory.size());
 
     const auto launch = [&](std::string_view name, Runner runner, const YAML::Node& node) {
         modules.emplace_back(run_guarded, name, runner, node, std::ref(database),
                              std::ref(**messaging), std::ref(supervisor));
     };
-    launch("feature", alttech::modules::run_feature, configuration->feature);
-    launch("microstructure", alttech::modules::run_microstructure,
-           configuration->microstructure);
-    launch("structure", alttech::modules::run_structure, configuration->structure);
-    launch("regime", alttech::modules::run_regime, configuration->regime);
-    launch("cross_venue", alttech::modules::run_cross_venue, configuration->cross_venue);
-    launch("macro", alttech::modules::run_macro, configuration->macro);
+    for (const auto& module : inventory) launch(module.name, module.runner, *module.config);
 
     auto& shutdown = alttech::ShutdownToken::instance();
     const bool started = supervisor.wait_until_started();
     if (started) {
         alttech::notify_ready();
         alttech::notify_status("all analytics modules ready");
-        alttech::log::info("analytics_service_ready", {{"modules", 5}});
+        alttech::log::info("analytics_service_ready", {{"modules", static_cast<int64_t>(inventory.size())}});
 
         // Liveness cadence: when the manager set WatchdogSec, tick at half the
         // interval (systemd's recommendation) so a silent process hang — not

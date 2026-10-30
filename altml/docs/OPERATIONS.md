@@ -32,5 +32,31 @@ Database roles, read-only source access, NATS permissions, and configuration
 files are described in [Database](DATABASE.md), [NATS](NATS.md),
 [Configuration](CONFIGURATION.md), and the repository [README](../README.md).
 
+## Original live-input durability
+
+The inference consumer commits the original AltTech envelope in
+`feature_vectors.original_live_payload` before cache/model processing and source
+ACK. This also applies without a loaded model. Persistence failures use the
+existing delayed NAK path; monitor consumer backlog and archive errors rather
+than clearing the durable. The existing archive values remain first-wins when
+backfill arrived first; the nullable payload separately retains the original
+live-observed vector. A conflicting original vector under the same archive key
+is an error, never successful persistence.
+
+Apply `0001_original_live_payload.sql` before activating this writer, using the
+packaged `apply-additive-migrations.sh` with explicit `PGDATABASE` and the
+existing owner connection environment. The runner checks its separate additive
+migration ledger and bounds DDL locks/statements. Do not rerun full bootstrap or
+change the historical `schema.sql` checksum for this extension. Check partition
+count, free space and storage growth first: original envelope bytes add storage
+within the existing partition retention. A lock timeout is a failed migration,
+not permission to remove the bound during live processing.
+
+Executable rollback leaves the nullable column and additive ledger in place;
+the old binary ignores them. It also restores the old archive-before-ACK
+limitation, so a restored process does not establish original-input durability.
+Retain already captured bytes and consumer state; do not reconstruct missing
+historical live inputs from later feature revisions.
+
 Credentials belong in `/etc/altml/common.env`. Keep them out of source files,
 command arguments, and logs.

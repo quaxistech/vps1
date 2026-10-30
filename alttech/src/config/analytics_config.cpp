@@ -134,7 +134,7 @@ alttech::Result<AnalyticsConfig> parse_analytics_config(const YAML::Node& docume
     }
 
     const std::string persist_windows =
-        alttech::config::opt_str(*microstructure, "persist_windows", "15s,30s,1m");
+        alttech::config::opt_str(*microstructure, "persist_windows", "1s,5s,15s,30s,1m");
     const std::set<std::string, std::less<>> windows = {"1s", "5s", "15s", "30s", "1m"};
     for (std::size_t begin = 0, end = 0; begin < persist_windows.size(); begin = end + 1) {
         end = persist_windows.find(',', begin);

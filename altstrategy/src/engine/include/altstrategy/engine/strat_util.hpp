@@ -16,7 +16,10 @@ namespace altstrategy::engine::su {
 // ATR-anchored geometry. LONG: stop below, target above; SHORT mirrored.
 inline void geo_from_atr(RawSignal& sig, Side side, double price, double atr,
                          double stop_mult, double target_mult) {
-    const double buffer = atr > 0 ? atr : price * 0.004; // 0.4% fallback
+    if (!std::isfinite(price) || price <= 0 || !std::isfinite(atr) || atr <= 0 ||
+        !std::isfinite(stop_mult) || stop_mult <= 0 || !std::isfinite(target_mult) || target_mult <= 0)
+        return; // no geometry rather than an invented0.4% volatility
+    const double buffer = atr;
     sig.entry_hint = price;
     if (side == Side::long_) {
         sig.invalidation_hint = price - stop_mult * buffer;

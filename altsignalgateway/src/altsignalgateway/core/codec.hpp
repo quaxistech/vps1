@@ -34,6 +34,11 @@ Result<std::string> canonical_serialize(const google::protobuf::MessageLite& msg
 // SignalEnvelope.payload_sha256 and in the journal.
 Result<std::string> canonical_hash(const google::protobuf::MessageLite& msg);
 
+// Verify exact received payload slices, including query nesting. No
+// reserialization is allowed at this consumer boundary. History carries only
+// summaries/envelopes, so there is no payload there to verify.
+Result<size_t> verify_server_payloads(std::string_view bytes);
+
 // Frame helpers for the WebSocket protocol.
 Result<std::string> encode_server_frame(const altsignalgateway::v1::ServerFrame& frame);
 

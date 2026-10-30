@@ -395,6 +395,12 @@ the whole system, read from AltTech's own table over a read-only foreign
 connection at ingest. Names, units, source times and freshness bounds are part
 of the versioned `MacroSnapshot` message in `proto/gateway.proto`.
 
+Both the bar time and computation time must be at or before the original T0.
+If a later method/source correction replaced that minute, the reader can use
+an older eligible minute within the age bound or report absence; it never
+presents the replacement as information available before its computation.
+Already journalled payloads remain immutable.
+
 | field | type | req | class | meaning |
 |---|---|---|---|---|
 | `present` | bool | yes | — | false ⇒ everything below is absent |

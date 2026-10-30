@@ -36,6 +36,7 @@ message Envelope {
         // Tag 60 is the producer's; it must not be renumbered here.
         VenueFeatureVector venue_feature_vector = 60;
         CrossVenueFeatureVector cross_venue_feature_vector = 61;
+        VenueMicrostructureVector venue_microstructure_vector = 62;
         // Tag 31 is the producer's; declared, not reused.
         MicrostructureVector microstructure_vector = 31;
     }

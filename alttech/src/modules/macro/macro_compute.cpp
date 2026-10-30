@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <map>
+#include <numeric>
 #include <unordered_map>
 
 namespace alttech::modules::macro {
@@ -26,9 +28,9 @@ MinuteIndex index_minutes(const std::vector<IntradayPoint>& s) {
     return idx;
 }
 
-const IntradayPoint* at(const std::vector<IntradayPoint>& s, const MinuteIndex& idx, int64_t t) {
+const IntradayPoint* at(const std::vector<IntradayPoint>& s, const MinuteIndex& idx, int64_t t, int64_t asof_ms) {
     const auto it = idx.find(t);
-    return it == idx.end() ? nullptr : &s[it->second];
+    return it == idx.end() || s[it->second].known_at_ms > asof_ms ? nullptr : &s[it->second];
 }
 
 // A return is published only when BOTH ends are real quotes. Across a weekend
@@ -47,35 +49,51 @@ std::optional<double> log_return(const IntradayPoint* now, const IntradayPoint* 
 class DailyCursor {
 public:
     DailyCursor(const std::vector<DailyPoint>& points, std::string_view code)
-        : points_(points), code_(code) {}
+        : points_(points), code_(code), order_(points.size()) {
+        std::iota(order_.begin(), order_.end(), 0U);
+        std::stable_sort(order_.begin(), order_.end(), [&](size_t a, size_t b) {
+            if (usable_at(points_[a]) != usable_at(points_[b])) return usable_at(points_[a]) < usable_at(points_[b]);
+            if (points_[a].observation_start_ms != points_[b].observation_start_ms) return points_[a].observation_start_ms < points_[b].observation_start_ms;
+            return points_[a].revision < points_[b].revision;
+        });
+    }
 
     void advance_to(int64_t t0_ms) {
-        while (next_ < points_.size() &&
-               available_at_ms(code_, points_[next_].observation_start_ms) <= t0_ms) {
-            previous_ = current_;
-            current_ = next_;
-            ++next_;
+        while (next_ < order_.size() && usable_at(points_[order_[next_]]) <= t0_ms) {
+            const size_t index = order_[next_++];
+            const auto prior = known_.find(points_[index].observation_start_ms);
+            if (prior != known_.end() && points_[index].version_at_ms > 0 &&
+                points_[prior->second].version_at_ms > points_[index].version_at_ms) continue;
+            known_[points_[index].observation_start_ms] = index;
+        }
+        current_ = previous_ = kNone;
+        if (!known_.empty()) {
+            auto latest = known_.rbegin();
+            current_ = latest->second;
+            if (++latest != known_.rend()) previous_ = latest->second;
         }
     }
 
-    [[nodiscard]] bool has_value() const { return current_ != kNone; }
+    [[nodiscard]] bool has_value() const { return current_ != kNone && points_[current_].valid; }
     [[nodiscard]] double value() const { return points_[current_].value; }
-    [[nodiscard]] bool has_previous() const { return previous_ != kNone; }
+    [[nodiscard]] bool has_previous() const { return previous_ != kNone && points_[previous_].valid; }
     [[nodiscard]] double previous() const { return points_[previous_].value; }
-
-    // How long ago the newest usable observation became usable. Published as a
-    // feature so a consumer can see how old the daily side of a spread is
-    // instead of assuming it is current.
     [[nodiscard]] double age_hours(int64_t t0_ms) const {
         if (!has_value()) return 0.0;
-        const int64_t usable_at = available_at_ms(code_, points_[current_].observation_start_ms);
-        return static_cast<double>(t0_ms - usable_at) / static_cast<double>(kHour);
+        return static_cast<double>(t0_ms - usable_at(points_[current_])) / static_cast<double>(kHour);
     }
 
 private:
+    [[nodiscard]] int64_t usable_at(const DailyPoint& p) const {
+        // Actual source evidence supersedes a schedule estimate. The estimate
+        // remains solely for old clockless fixtures, never production rows.
+        return p.known_at_ms > 0 ? p.known_at_ms : available_at_ms(code_, p.observation_start_ms);
+    }
     static constexpr size_t kNone = static_cast<size_t>(-1);
     const std::vector<DailyPoint>& points_;
     std::string_view code_;
+    std::vector<size_t> order_;
+    std::map<int64_t, size_t> known_;
     size_t next_ = 0;
     size_t current_ = kNone;
     size_t previous_ = kNone;
@@ -225,17 +243,24 @@ std::vector<MacroVector> compute_macro_series(const MacroInputs& in, int64_t fro
         DailyCursor prime_fix(in.fixing, "REF.USDCNY.PBOC");
         for (const auto& d : in.cnh_daily_mid) {
             // Just after the parity for that day becomes usable here.
-            const int64_t at = available_at_ms("REF.USDCNY.PBOC", d.observation_start_ms) + kHour;
-            if (at >= from_ms) break;
+            const int64_t at = std::max(available_at_ms("REF.USDCNY.PBOC", d.observation_start_ms), d.known_at_ms) + kHour;
+            if (at >= from_ms || !d.valid) continue;
             prime_fix.advance_to(at);
             if (prime_fix.has_value() && d.value > 0.0) {
                 cnh_fix_gap_z.observe(basis_points(d.value, prime_fix.value()));
             }
         }
+        std::map<int64_t, const DailyPoint*> known_vix;
         for (const auto& d : in.vix) {
-            if (available_at_ms("IDX.VIX", d.observation_start_ms) >= from_ms) break;
-            vix_z.observe(d.value);
+            const int64_t usable = d.known_at_ms > 0 ? d.known_at_ms : available_at_ms("IDX.VIX", d.observation_start_ms);
+            if (usable >= from_ms) continue;
+            const auto prior = known_vix.find(d.observation_start_ms);
+            if (prior == known_vix.end() || prior->second->version_at_ms < d.version_at_ms ||
+                (prior->second->version_at_ms == d.version_at_ms && prior->second->known_at_ms <= d.known_at_ms)) {
+                known_vix[d.observation_start_ms] = &d;
+            }
         }
+        for (const auto& [_, d] : known_vix) if (d->valid) vix_z.observe(d->value);
     }
     // The gap as it stood on the previous day, for the one-day change. Taken
     // once per day: comparing a minute against the same day's earlier minute
@@ -262,19 +287,19 @@ std::vector<MacroVector> compute_macro_series(const MacroInputs& in, int64_t fro
         const int64_t cutoff = intraday_cutoff_ms(t);
         const int64_t tick = cutoff - kMinute;
         for (int64_t m = vol_fed_until + kMinute; m < cutoff; m += kMinute) {
-            cnh_vol_1h.push(m, log_return(at(in.usdcnh, cnh_idx, m), at(in.usdcnh, cnh_idx, m - kMinute)));
-            cnh_vol_1d.push(m, log_return(at(in.usdcnh, cnh_idx, m), at(in.usdcnh, cnh_idx, m - kMinute)));
-            eur_vol_1h.push(m, log_return(at(in.eurusd, eur_idx, m), at(in.eurusd, eur_idx, m - kMinute)));
-            jpy_vol_1h.push(m, log_return(at(in.usdjpy, jpy_idx, m), at(in.usdjpy, jpy_idx, m - kMinute)));
-            xau_vol_1h.push(m, log_return(at(in.xauusd, xau_idx, m), at(in.xauusd, xau_idx, m - kMinute)));
-            xau_vol_1d.push(m, log_return(at(in.xauusd, xau_idx, m), at(in.xauusd, xau_idx, m - kMinute)));
+            cnh_vol_1h.push(m, log_return(at(in.usdcnh, cnh_idx, m, t), at(in.usdcnh, cnh_idx, m - kMinute, t)));
+            cnh_vol_1d.push(m, log_return(at(in.usdcnh, cnh_idx, m, t), at(in.usdcnh, cnh_idx, m - kMinute, t)));
+            eur_vol_1h.push(m, log_return(at(in.eurusd, eur_idx, m, t), at(in.eurusd, eur_idx, m - kMinute, t)));
+            jpy_vol_1h.push(m, log_return(at(in.usdjpy, jpy_idx, m, t), at(in.usdjpy, jpy_idx, m - kMinute, t)));
+            xau_vol_1h.push(m, log_return(at(in.xauusd, xau_idx, m, t), at(in.xauusd, xau_idx, m - kMinute, t)));
+            xau_vol_1d.push(m, log_return(at(in.xauusd, xau_idx, m, t), at(in.xauusd, xau_idx, m - kMinute, t)));
         }
         if (cutoff - kMinute > vol_fed_until) vol_fed_until = cutoff - kMinute;
 
-        const IntradayPoint* cnh = at(in.usdcnh, cnh_idx, tick);
-        const IntradayPoint* eur = at(in.eurusd, eur_idx, tick);
-        const IntradayPoint* jpy = at(in.usdjpy, jpy_idx, tick);
-        const IntradayPoint* xau = at(in.xauusd, xau_idx, tick);
+        const IntradayPoint* cnh = at(in.usdcnh, cnh_idx, tick, t);
+        const IntradayPoint* eur = at(in.eurusd, eur_idx, tick, t);
+        const IntradayPoint* jpy = at(in.usdjpy, jpy_idx, tick, t);
+        const IntradayPoint* xau = at(in.xauusd, xau_idx, tick, t);
 
         // The offshore-versus-fix gap, in basis points. Both are CNY/CNH per
         // USD, so the difference is meaningful; they are different series and
@@ -305,9 +330,9 @@ std::vector<MacroVector> compute_macro_series(const MacroInputs& in, int64_t fro
         Writer w{v};
 
         // --- China ----------------------------------------------------------
-        w.put(log_return(cnh, at(in.usdcnh, cnh_idx, tick - 5 * kMinute)));
-        w.put(log_return(cnh, at(in.usdcnh, cnh_idx, tick - kHour)));
-        w.put(log_return(cnh, at(in.usdcnh, cnh_idx, tick - kDay)));
+        w.put(log_return(cnh, at(in.usdcnh, cnh_idx, tick - 5 * kMinute, t)));
+        w.put(log_return(cnh, at(in.usdcnh, cnh_idx, tick - kHour, t)));
+        w.put(log_return(cnh, at(in.usdcnh, cnh_idx, tick - kDay, t)));
         w.put(cnh_vol_1h.value());
         w.put(cnh_vol_1d.value());
         w.put(cnh != nullptr && cnh->traded ? std::optional<double>(cnh->spread_bps)
@@ -329,14 +354,14 @@ std::vector<MacroVector> compute_macro_series(const MacroInputs& in, int64_t fro
         w.put(fixing.has_value() ? std::optional<double>(fixing.age_hours(t)) : std::nullopt);
 
         // --- FX and metals ---------------------------------------------------
-        w.put(log_return(eur, at(in.eurusd, eur_idx, tick - kHour)));
-        w.put(log_return(eur, at(in.eurusd, eur_idx, tick - kDay)));
+        w.put(log_return(eur, at(in.eurusd, eur_idx, tick - kHour, t)));
+        w.put(log_return(eur, at(in.eurusd, eur_idx, tick - kDay, t)));
         w.put(eur_vol_1h.value());
-        w.put(log_return(jpy, at(in.usdjpy, jpy_idx, tick - kHour)));
-        w.put(log_return(jpy, at(in.usdjpy, jpy_idx, tick - kDay)));
+        w.put(log_return(jpy, at(in.usdjpy, jpy_idx, tick - kHour, t)));
+        w.put(log_return(jpy, at(in.usdjpy, jpy_idx, tick - kDay, t)));
         w.put(jpy_vol_1h.value());
-        w.put(log_return(xau, at(in.xauusd, xau_idx, tick - kHour)));
-        w.put(log_return(xau, at(in.xauusd, xau_idx, tick - kDay)));
+        w.put(log_return(xau, at(in.xauusd, xau_idx, tick - kHour, t)));
+        w.put(log_return(xau, at(in.xauusd, xau_idx, tick - kDay, t)));
         w.put(xau_vol_1h.value());
         w.put(xau_vol_1d.value());
 

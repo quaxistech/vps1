@@ -4,6 +4,21 @@
 
 using altmacro::providers::FredProvider;
 
+TEST_CASE("date-only ALFRED vintage waits for the full Eastern date", "[fred][vintage]") {
+    const auto winter = FredProvider::date_only_vintage_bound("2026-01-05");
+    const auto summer = FredProvider::date_only_vintage_bound("2026-07-05");
+    REQUIRE(winter);
+    REQUIRE(summer);
+    constexpr int64_t day = 86'400'000;
+    CHECK(*winter % day == 5 * 3'600'000);
+    CHECK(*summer % day == 5 * 3'600'000); // safely after 04UTC summer day-end
+    CHECK_FALSE(FredProvider::date_only_vintage_bound("2026-02-30"));
+    CHECK_FALSE(FredProvider::date_only_vintage_bound("2026-aa-01"));
+    CHECK_FALSE(FredProvider::date_only_vintage_bound("2026-13-01"));
+    CHECK(FredProvider::date_only_vintage_bound("2024-02-29"));
+    CHECK_FALSE(FredProvider::date_only_vintage_bound("2026-02-29"));
+}
+
 TEST_CASE("a normal FRED series parses", "[fred]") {
     const std::string body =
         "observation_date,DGS10\n"

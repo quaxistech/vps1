@@ -54,6 +54,7 @@ message Envelope {
         Trade trade = 20;
         Candle candle = 21;
         CandleBatch candle_batch = 22;
+        OrderBookDelta order_book_delta = 37;
         GlobalUniverseSnapshot universe_snapshot = 50;
         GlobalUniverseChange universe_change = 51;
 

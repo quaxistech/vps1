@@ -40,6 +40,26 @@ message VenueFeatureVector {
     int64 computed_at_ms = 18;
 }
 
+// Producer-owned tag62 shape, copied field-for-field from AltTech.
+message VenueMicrostructureVector {
+    AnalyticsScope scope = 1;
+    Exchange exchange = 2;
+    int64 canonical_pair_id = 3;
+    int64 instrument_id = 4;
+    string window_label = 5;
+    int64 window_start_ms = 6;
+    string profile = 7;
+    string feature_set_name = 8;
+    int32 feature_set_version = 9;
+    string schema_hash = 10;
+    string engine_version = 11;
+    repeated float values = 12 [packed = true];
+    bytes validity_bitmap = 13;
+    AnalyticsVectorStatus status = 14;
+    QualityState venue_quality = 15;
+    int64 computed_at_ms = 16;
+}
+
 // One venue's contribution to a consensus estimate.
 message VenueContribution {
     Exchange exchange = 1;

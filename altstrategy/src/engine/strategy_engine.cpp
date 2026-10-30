@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace altstrategy::engine {
 
@@ -22,11 +23,19 @@ int quality_rank(ContextQuality q) {
 }
 
 bool feature_present(const DecisionContext& ctx, const std::string& name) {
-    for (const auto* s : {&ctx.bitget_features, &ctx.cross_venue_features, &ctx.microstructure}) {
-        const auto it = s->values.find(name);
-        if (it != s->values.end() && std::isfinite(it->second)) return true;
-    }
-    // Information venues are NOT searched.
+    // Pin the owner vocabulary used by these sixteen detectors. A same-named
+    // value from another block cannot satisfy a missing prerequisite.
+    const FeatureSummary* owner = &ctx.bitget_features;
+    if (name == "book_imbalance" || name == "book_microprice_dev_bps" || name == "cvd_delta" ||
+        name == "spread_bps" || name == "book_bid_depth" || name == "book_ask_depth")
+        owner = &ctx.microstructure;
+    else if (name == "funding_divergence" || name == "oi_growth_1h" || name == "bitget_lead_score" ||
+             name == "bitget_lag_ms" || name == "bitget_mid_deviation_bps")
+        owner = &ctx.cross_venue_features;
+    const auto found = owner->values.find(name);
+    if (owner->valid && !owner->schema_mismatch && found != owner->values.end() &&
+        std::isfinite(found->second) && (name != "atr_14" || found->second > 0)) return true;
+    // Information venues and other owner blocks are not substitutes.
     //
     // A prerequisite has to be checked where the strategy will actually read.
     // Every strategy in the catalogue reads ctx.bitget_features,
@@ -138,7 +147,9 @@ std::vector<StrategyCandidate> StrategyEngine::run(const DecisionContext& ctx, i
         if (!raw) { ++fc.no_setup; continue; }
         RawSignal& r = *raw;
         // Technical geometry guard only — never hide a weak-but-valid setup.
-        if (su::raw_rr(r) < std::max(cfg_.min_rr, 0.0) && cfg_.min_rr > 0) { ++fc.geometry_rejected; continue; }
+        const auto reward_risk = su::raw_rr(r);
+        if (!(reward_risk > 0) || !std::isfinite(reward_risk) ||
+            (cfg_.min_rr > 0 && reward_risk < cfg_.min_rr)) { ++fc.geometry_rejected; continue; }
         if (r.side == Side::unspecified) { ++fc.geometry_rejected; continue; }
 
         SelectionMode mode = SelectionMode::exploit;
@@ -160,7 +171,13 @@ std::vector<StrategyCandidate> StrategyEngine::run(const DecisionContext& ctx, i
         c.side = r.side;
         c.setup_time_ms = ctx.event_time_ms;
         c.created_at_ms = now_ms;
-        c.expires_at_ms = now_ms + cfg_.candidate_ttl_ms;
+        // Downstream delivery cannot grant an old hypothesis a new validity
+        // window. Reassessment may refresh facts, never its original expiry.
+        if (cfg_.candidate_ttl_ms <= 0 || now_ms > std::numeric_limits<int64_t>::max() - cfg_.candidate_ttl_ms) {
+            ++fc.ineligible["candidate_ttl_invalid"]; continue;
+        }
+        c.expires_at_ms = std::min(ctx.expires_at_ms, now_ms + cfg_.candidate_ttl_ms);
+        if (c.expires_at_ms <= now_ms) { ++fc.ineligible["context_expired"]; continue; }
         c.context_id = ctx.context_id;
         c.context_revision = ctx.context_revision;
         c.raw_setup_score = std::clamp(r.raw_setup_score, 0.0, 1.0);
@@ -177,7 +194,7 @@ std::vector<StrategyCandidate> StrategyEngine::run(const DecisionContext& ctx, i
         // 48h is a refusal boundary, not a clamp. A strategy asking for longer
         // is stating a thesis this engine does not run; truncating it would
         // execute a different idea under the same name.
-        if (r.expected_horizon_ms > kMaxHoldingMs) {
+        if (r.expected_horizon_ms <= 0 || r.expected_horizon_ms > kMaxHoldingMs) {
             // No candidate at all. This layer is pure logic and does not log;
             // the refusal is observable as the absence of the candidate, and
             // `no candidate produced` is the correct outcome for a thesis the

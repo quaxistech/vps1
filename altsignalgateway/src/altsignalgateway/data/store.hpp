@@ -196,8 +196,9 @@ public:
     Result<domain::InstrumentResolution> resolve_instrument(int64_t canonical_pair_id,
                                                             int64_t as_of_ms);
     // AltTech's macro-core vector as of `t0_ms`: the newest minute whose
-    // bar_open_time <= T0, refused as MACRO_STALE when older than
-    // `max_age_ms`. The member names come from AltTech's own registry, cached
+    // bar_open_time and computed_at <= T0, within `max_age_ms`. A method or
+    // source correction computed later cannot enrich an earlier signal.
+    // The member names come from AltTech's own registry, cached
     // per feature-set version for the life of the process (they are frozen).
     Result<domain::MacroSnapshot> load_macro_asof(int64_t t0_ms, int64_t max_age_ms);
 

@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <string>
+#include <limits>
 
 using namespace altsignalgateway::domain;
 
@@ -100,6 +101,22 @@ TEST_CASE("a stale signature is refused") {
     // Inside the window it verifies.
     auto fresh = good_request(reg, now - 59'000);
     CHECK(verify_auth(reg, fresh, now, 60'000, nullptr) == AuthFailure::none);
+}
+
+TEST_CASE("authentication timestamp extremes and inclusive skew boundaries") {
+    const auto reg = make_registry();
+    constexpr int64_t now = 1'787'000'000'000;
+    for (const auto timestamp : {std::numeric_limits<int64_t>::min(),
+                                std::numeric_limits<int64_t>::max(), int64_t{0}, int64_t{-1},
+                                now - 60'001, now + 60'001}) {
+        CHECK(verify_auth(reg, good_request(reg, timestamp), now, 60'000, nullptr) ==
+              AuthFailure::timestamp_skew);
+    }
+    for (const auto timestamp : {now - 60'000, now, now + 60'000}) {
+        CHECK(verify_auth(reg, good_request(reg, timestamp), now, 60'000, nullptr) ==
+              AuthFailure::none);
+    }
+    CHECK(verify_auth(reg, good_request(reg, now), now, -1, nullptr) == AuthFailure::timestamp_skew);
 }
 
 TEST_CASE("identity cannot be borrowed") {

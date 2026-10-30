@@ -25,6 +25,8 @@ struct WriteStats {
 
 // Batch UPSERT into market_candles_1m. Natural key (exchange_id, instrument_id, open_time).
 // Identical rows are no-ops; changed rows bump `revision` and refresh audit columns.
+// Optional unknowns retain known values. Source/quality/close-time corrections
+// are semantic revisions; a changed local receipt timestamp alone is not.
 // Caller controls transaction scope and chunking (<= ~2000 rows advisable per call).
 Result<WriteStats> upsert_candles_1m(pqxx::transaction_base& txn, const std::vector<CandleRow>& rows);
 

@@ -57,8 +57,8 @@ struct PlanConfig {
     int64_t scalp_max_ms = 30LL * 60 * 1000;
     int64_t intraday_max_ms = 8LL * 3600 * 1000;
     // The EXTENDED_INTRADAY class cap. May be configured DOWN, never up: the
-    // absolute ceiling is kMaxHoldingMs and application.cpp refuses a larger
-    // value at startup, while generate_plans() bounds by it regardless.
+    // absolute ceiling is kMaxHoldingMs. Configuration parsing and direct
+    // generate_plans callers reject invalid bounds before any time arithmetic.
     int64_t extended_max_ms = kMaxHoldingMs;
     int64_t max_entry_timeout_ms = 2LL * 3600 * 1000; // entry can't wait 48h (§14)
     double default_max_slippage_bps = 6.0;
