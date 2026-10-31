@@ -9,6 +9,9 @@ ALTER TABLE altml.feature_vectors
     ADD COLUMN IF NOT EXISTS original_live_received_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS original_live_engine_version TEXT;
 
+-- NOT VALID: enforced for every row written from now on, without scanning the
+-- archive (tens of GB) under an exclusive lock. Rows that predate this
+-- migration hold NULL in every column added above, so they satisfy the check.
 DO $migration$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -22,7 +25,7 @@ BEGIN
             (original_live_payload IS NOT NULL AND original_live_values IS NOT NULL
              AND original_live_validity_bitmap IS NOT NULL
              AND original_live_computed_at IS NOT NULL AND original_live_received_at IS NOT NULL
-             AND original_live_engine_version IS NOT NULL));
+             AND original_live_engine_version IS NOT NULL)) NOT VALID;
     END IF;
 END
 $migration$;
