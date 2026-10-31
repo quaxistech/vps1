@@ -43,3 +43,7 @@ tar -C "$REPO_ROOT/build/release-stage" -cf - "$RELEASE" | \
 sha256sum "$REPO_ROOT/dist/$RELEASE.tar.zst" > \
     "$REPO_ROOT/dist/$RELEASE.tar.zst.sha256"
 echo "release ready: dist/$RELEASE.tar.zst"
+
+# Remove temporary packaging files after successful archive creation.
+rm -rf -- "$STAGE"
+rmdir -- "$(dirname "$STAGE")" 2>/dev/null || true

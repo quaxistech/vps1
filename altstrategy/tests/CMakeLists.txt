@@ -40,7 +40,7 @@ target_compile_definitions(altstrategy_integration_tests PRIVATE
     ALTSTRATEGY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(altstrategy_integration_tests PRIVATE
     altstrategy_engine_io altstrategy_engine Catch2::Catch2WithMain)
-catch_discover_tests(altstrategy_integration_tests PROPERTIES LABELS integration)
+catch_discover_tests(altstrategy_integration_tests PROPERTIES LABELS integration SKIP_RETURN_CODE 4)
 
 # Hand-assembled parameterised SQL is validated only by the database at runtime.
 # A 67-column INSERT once shipped with 68 placeholders and the whole suite still

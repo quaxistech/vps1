@@ -64,3 +64,7 @@ tar --use-compress-program='zstd -19' \
     -cf "dist/${RELEASE}.tar.zst" -C "build/release-stage" "$RELEASE"
 ls -lh "dist/${RELEASE}.tar.zst"
 echo "==> release built: dist/${RELEASE}.tar.zst (commit ${COMMIT})"
+
+# Remove temporary packaging files after successful archive creation.
+rm -rf -- "$STAGE"
+rmdir -- "$(dirname "$STAGE")" 2>/dev/null || true

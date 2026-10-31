@@ -8,8 +8,10 @@ cmake --build --preset release
 ctest --preset release --output-on-failure
 ```
 
-(`scripts/build-release.sh` reconfigures the same tree with tests off before
-packaging.)
+(`scripts/build-release.sh` configures, builds and runs this same `release`
+preset with tests enabled; any failing test stops packaging. An integration
+case that Catch2 skips for a missing fixture exits 4 and CTest records it as
+skipped, not passed, so set `PGBIN` when packaging a release.)
 
 The test suite is organized into:
 

@@ -40,7 +40,7 @@ add_executable(altml_archive_tests unit/test_feature_archive.cpp)
 target_include_directories(altml_archive_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_compile_definitions(altml_archive_tests PRIVATE ALTML_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(altml_archive_tests PRIVATE altml_core altml_proto_alttech Catch2::Catch2WithMain)
-catch_discover_tests(altml_archive_tests PROPERTIES LABELS integration)
+catch_discover_tests(altml_archive_tests PROPERTIES LABELS integration SKIP_RETURN_CODE 4)
 
 add_executable(altml_model_buffer_tests unit/test_model_buffer.cpp)
 target_include_directories(altml_model_buffer_tests PRIVATE "${CMAKE_SOURCE_DIR}/src" "${lightgbm_SOURCE_DIR}/include")

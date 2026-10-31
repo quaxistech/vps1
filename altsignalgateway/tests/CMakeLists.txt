@@ -33,7 +33,7 @@ add_executable(altsignalgateway_macro_store_tests integration/test_macro_availab
     integration/test_quality_publication.cpp)
 target_link_libraries(altsignalgateway_macro_store_tests PRIVATE
     altsignalgateway_core Catch2::Catch2WithMain)
-catch_discover_tests(altsignalgateway_macro_store_tests PROPERTIES LABELS integration)
+catch_discover_tests(altsignalgateway_macro_store_tests PROPERTIES LABELS integration SKIP_RETURN_CODE 4)
 
 # --- adversarial publisher ----------------------------------------------------
 # Deliberately NOT installed by the release: it publishes to a subject this

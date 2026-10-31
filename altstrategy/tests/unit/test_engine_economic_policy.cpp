@@ -144,12 +144,22 @@ TEST_CASE("every candidate carries the verdict, whatever its lifecycle", "[polic
     for (const auto& m : eng.metas()) st.lifecycle[m.strategy_id] = Lifecycle::research;
     const auto cands = eng.run(ctx, kNow, st);
     REQUIRE_FALSE(cands.empty());
+    std::size_t evaluated = 0;
     for (const auto& c : cands) {
         INFO(c.strategy_id);
         CHECK(c.econ.horizon_minutes == evaluation_horizon_minutes(c.expected_horizon_ms));
         CHECK_FALSE(c.econ.reason_code.empty());
-        CHECK(c.econ.evaluated());   // the fixture has fresh estimates for every horizon
+        if (c.econ.horizon_minutes != 0) {
+            CHECK(c.econ.evaluated());   // the fixture has fresh estimates for 15m / 1h / 4h
+            ++evaluated;
+        } else {
+            // A setup horizon with no exact payoff model is refused, never substituted.
+            CHECK(c.econ.state == EconState::model_unavailable);
+            CHECK(c.econ.reason_code == "PAYOFF_HORIZON_UNSUPPORTED");
+            CHECK_FALSE(c.econ.actionable());
+        }
     }
+    CHECK(evaluated > 0);
 }
 
 TEST_CASE("a SHADOW model's estimate is recorded but never actionable", "[policy][failclosed]") {

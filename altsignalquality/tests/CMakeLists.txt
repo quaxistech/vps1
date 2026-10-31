@@ -70,7 +70,7 @@ target_link_libraries(altsignalquality_integration_tests PRIVATE
 add_executable(altsignalquality_publication_store_tests unit/test_publication_store.cpp)
 target_compile_definitions(altsignalquality_publication_store_tests PRIVATE ALTSQ_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(altsignalquality_publication_store_tests PRIVATE altsignalquality_core Catch2::Catch2WithMain)
-catch_discover_tests(altsignalquality_publication_store_tests PROPERTIES LABELS integration)
+catch_discover_tests(altsignalquality_publication_store_tests PROPERTIES LABELS integration SKIP_RETURN_CODE 4)
 
 add_executable(altsignalquality_model_buffer_tests unit/test_model_buffer.cpp
     ../src/altsignalquality/components/model_runtime.cpp)
