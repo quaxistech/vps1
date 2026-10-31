@@ -320,6 +320,14 @@ int storage_writer(config::ServiceContext ctx) {
                     });
                     if (rec) {
                         ++stats_rejected;
+                        // Explicitly surface retention/partition conflicts:
+                        // the payload is retained in rejected_market_events,
+                        // NOT silently treated as a restored market candle.
+                        if (poison.error.find("no partition of relation") != std::string::npos) {
+                            log::error("writer_missing_partition_quarantined",
+                                       {{"subject", poison.subject},
+                                        {"message", poison.error}});
+                        }
                         log::error("writer_poison_message_rejected",
                                    {{"subject", poison.subject},
                                     {"message", poison.error}});

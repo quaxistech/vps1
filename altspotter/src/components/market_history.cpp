@@ -17,6 +17,7 @@
 // The live gateways are separate components and keep streaming during backfill.
 
 #include "components/components.hpp"
+#include "components/gap_repair_logic.hpp"
 #include "components/history_owner.hpp"
 #include "core/readiness.hpp"
 #include "core/shutdown.hpp"
@@ -426,7 +427,34 @@ public:
         int64_t rows_published = 0;
         int64_t cursor_end = to_incl + timeutil::kMsPerMinute;
         std::string failure;
-        while (cursor_end > from && !stop_()) {
+        // Publication to JetStream is NOT proof of a PostgreSQL insert. In
+        // production a CLEANUP pass removed the May partition; 1477 repair
+        // batches were published but the storage writer had to quarantine them.
+        // Refuse the REST fetch until *all* target month partitions exist.
+        bool partitions_present = false;
+        if (from <= 0 || to_incl < from) {
+            failure = "invalid repair time range";
+        } else {
+            const auto probe = pool_.with_txn([&](pqxx::work& txn) {
+                const auto row = txn.exec_params1(
+                    std::string(altspotter::integrity::kRepairPartitionsPresentSql),
+                    from, to_incl);
+                partitions_present = row[0].as<bool>();
+            });
+            if (!probe) {
+                failure = "repair partition catalog check failed";
+                log::error("repair_partition_probe_failed",
+                           {{"symbol", instr.symbol}, {"gap_id", cmd.gap_id()},
+                            {"message", probe.error().message}});
+            } else if (!partitions_present) {
+                failure = "missing market_candles_1m partition; retention-safe repair deferred";
+                log::warn("repair_partition_missing",
+                          {{"symbol", instr.symbol}, {"gap_id", cmd.gap_id()},
+                           {"from", timeutil::to_iso8601(from)},
+                           {"to", timeutil::to_iso8601(to_incl)}});
+            }
+        }
+        while (cursor_end > from && !stop_() && failure.empty()) {
             auto page = adapter_.fetch_candles(instr.symbol, Timeframe::m1, from, cursor_end,
                                                exchanges::CandleQueryKind::historical);
             if (!page) {

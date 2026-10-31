@@ -1,6 +1,9 @@
 #include "components/gap_repair_logic.hpp"
+#include "test_env.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+
+#include <string>
 
 using namespace altspotter::integrity;
 
@@ -98,4 +101,132 @@ TEST_CASE("a repair command is identified by its window", "[integrity][gap][regr
     REQUIRE(repair_message_id(7, kStart, 1) == repair_message_id(7, kStart, 1));
     REQUIRE(repair_message_id(7, kStart, 1) != repair_message_id(8, kStart, 1));
     REQUIRE(repair_message_id(7, kStart, 1) != repair_message_id(7, kStart, 2));
+}
+
+// Database-backed regression for the October 2026 incident. This uses the
+// harness's ISOLATED, temporary PostgreSQL database, never the VPS1 database.
+TEST_CASE("repair guards a retention-dropped month", "[integration][gap][regression]") {
+    if (!altspotter::test::TempDb::admin_dsn()) {
+        SKIP("isolated PostgreSQL test DSN unavailable (ALTSPOTTER_TEST_PG_DSN)");
+    }
+    altspotter::test::TempDb db;
+    REQUIRE(db.create());
+    const std::string bin = altspotter::test::bin_dir() + "/altspotter";
+    REQUIRE(altspotter::test::run_tool(
+        bin, {"migrate", "--dsn", db.dsn(), "--migrations", altspotter::test::migrations_dir()}) == 0);
+
+    pqxx::connection conn(db.dsn());
+    const auto exec = [&](const char* sql) {
+        pqxx::work tx(conn);
+        tx.exec(sql);
+        tx.commit();
+    };
+    const auto covered = [&](int64_t from_ms, int64_t to_ms) {
+        pqxx::read_transaction tx(conn);
+        const auto r = tx.exec_params1(
+            std::string(altspotter::integrity::kRepairPartitionsPresentSql), from_ms, to_ms);
+        return r[0].as<bool>();
+    };
+    // The migration helper creates partitions using session timezone for
+    // DATE -> timestamptz casts. Set UTC before creating fixture partitions,
+    // so the fixture models true UTC calendar months on any developer host.
+    exec("SET TIME ZONE 'UTC'");
+    // April and June are present; the gap month May has been dropped.
+    exec("SELECT altspotter_ensure_candle_partitions("
+         "'2026-04-01 00:00:00+00'::timestamptz, '2026-06-01 00:00:00+00'::timestamptz)");
+    exec("DROP TABLE IF EXISTS market_candles_1m_202605");
+
+    constexpr int64_t apr30 = 1777593540000LL; // 2026-04-30 23:59 UTC
+    constexpr int64_t may1  = 1777593600000LL; // 2026-05-01 00:00 UTC
+    constexpr int64_t june1 = 1780272000000LL; // 2026-06-01 00:00 UTC
+    CHECK(covered(apr30, apr30));
+    CHECK_FALSE(covered(may1, may1));
+    CHECK_FALSE(covered(apr30, june1));
+    CHECK(covered(june1, june1));
+    // A partition that covers only part of a calendar month is not safe
+    // for a full-month repair. A probe of only the month start would miss it.
+    exec("CREATE TABLE market_candles_1m_202605 PARTITION OF market_candles_1m "
+         "FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-05-31 21:00:00+00')");
+    CHECK_FALSE(covered(may1, may1));
+    exec("DROP TABLE market_candles_1m_202605");
+    // Explicitly providing capacity/partition makes this range eligible again.
+    exec("SELECT altspotter_ensure_candle_partitions("
+         "'2026-05-01 00:00:00+00'::timestamptz, '2026-05-01 00:00:00+00'::timestamptz)");
+    CHECK(covered(may1, may1));
+    CHECK(covered(apr30, june1));
+    // The read-only guard itself must not depend on the caller's timezone.
+    exec("SET TIME ZONE 'Europe/Moscow'");
+    CHECK(covered(may1, may1));
+    CHECK(covered(apr30, june1));
+}
+
+
+// Regression: the creator's DATE -> timestamptz casts previously depended on
+// the backend timezone and could produce a month shifted by several hours.
+// Uses only the harness's disposable PostgreSQL database.
+TEST_CASE("UTC candle partitions are independent of session timezone",
+          "[integration][partition][regression]") {
+    if (!altspotter::test::TempDb::admin_dsn()) {
+        SKIP("isolated PostgreSQL test DSN unavailable (ALTSPOTTER_TEST_PG_DSN)");
+    }
+    altspotter::test::TempDb db;
+    REQUIRE(db.create());
+    const std::string bin = altspotter::test::bin_dir() + "/altspotter";
+    REQUIRE(altspotter::test::run_tool(
+        bin, {"migrate", "--dsn", db.dsn(), "--migrations",
+              altspotter::test::migrations_dir()}) == 0);
+
+    pqxx::connection conn(db.dsn());
+    const auto exec = [&](const char* sql) {
+        pqxx::work tx(conn);
+        tx.exec(sql);
+        tx.commit();
+    };
+    const auto exact = [&](const std::string& parent, const std::string& child,
+                           const char* lower, const char* upper) {
+        pqxx::read_transaction tx(conn);
+        const auto row = tx.exec_params1(
+            "SELECT EXISTS(SELECT 1 FROM altspotter_partition_bounds($1::regclass) b "
+                "WHERE b.partition_name = $2 "
+                "AND b.lower_bound = $3::timestamptz "
+                "AND b.upper_bound = $4::timestamptz)",
+            parent, child, lower, upper);
+        return row[0].as<bool>();
+    };
+
+    exec("SET TIME ZONE 'Europe/Moscow'");
+    exec("SELECT altspotter_ensure_candle_partitions("
+         "'2026-03-01 00:00:00+00'::timestamptz, "
+         "'2026-03-01 00:00:00+00'::timestamptz)");
+    CHECK(exact("market_candles_1m", "market_candles_1m_202603",
+                "2026-03-01 00:00:00+00", "2026-04-01 00:00:00+00"));
+    CHECK(exact("market_candles_agg", "market_candles_agg_202603",
+                "2026-03-01 00:00:00+00", "2026-04-01 00:00:00+00"));
+
+    exec("SET TIME ZONE 'America/New_York'");
+    exec("SELECT altspotter_ensure_candle_partitions("
+         "'2026-02-01 00:00:00+00'::timestamptz, "
+         "'2026-02-01 00:00:00+00'::timestamptz)");
+    CHECK(exact("market_candles_1m", "market_candles_1m_202602",
+                "2026-02-01 00:00:00+00", "2026-03-01 00:00:00+00"));
+    CHECK(exact("market_candles_agg", "market_candles_agg_202602",
+                "2026-02-01 00:00:00+00", "2026-03-01 00:00:00+00"));
+
+    // Legacy partition with local-time bounds must not be silently treated
+    // as a valid UTC month or be dropped/recreated by the migration helper.
+    exec("SET TIME ZONE 'Europe/Moscow'");
+    exec("CREATE TABLE market_candles_1m_202601 PARTITION OF market_candles_1m "
+         "FOR VALUES FROM ('2026-01-01'::timestamptz) "
+         "TO ('2026-02-01'::timestamptz)");
+    CHECK_FALSE(exact("market_candles_1m", "market_candles_1m_202601",
+                      "2026-01-01 00:00:00+00", "2026-02-01 00:00:00+00"));
+    CHECK_THROWS([&] {
+        pqxx::work tx(conn);
+        tx.exec("SELECT altspotter_ensure_candle_partitions("
+                "'2026-01-01 00:00:00+00'::timestamptz, "
+                "'2026-01-01 00:00:00+00'::timestamptz)");
+        tx.commit();
+    }());
+    CHECK_FALSE(exact("market_candles_1m", "market_candles_1m_202601",
+                      "2026-01-01 00:00:00+00", "2026-02-01 00:00:00+00"));
 }

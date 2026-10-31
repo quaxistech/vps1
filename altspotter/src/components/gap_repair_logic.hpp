@@ -2,8 +2,29 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace altspotter::integrity {
+
+// A historical repair must not fetch/publish candles until the target month(s)
+// are physically writable. Retention may have dropped older partitions under
+// pressure; resurrecting them automatically would fight the storage budget.
+// This is a READ-ONLY catalog query; do not replace it with ensure_partitions.
+// It checks EVERY month in the inclusive range and works across year boundaries.
+inline constexpr std::string_view kRepairPartitionsPresentSql = R"sql(
+SELECT NOT EXISTS (
+    SELECT 1 FROM generate_series(
+        date_trunc('month', to_timestamp($1::bigint / 1000.0) AT TIME ZONE 'UTC'),
+        date_trunc('month', to_timestamp($2::bigint / 1000.0) AT TIME ZONE 'UTC'),
+        interval '1 month'
+    ) AS needed(month_start)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM altspotter_partition_bounds('market_candles_1m'::regclass) AS part
+        WHERE part.lower_bound AT TIME ZONE 'UTC' <= needed.month_start
+          AND part.upper_bound AT TIME ZONE 'UTC' >= needed.month_start + interval '1 month'
+    )
+)
+)sql";
 
 // The scheduling rules for repairing a history gap, kept pure so the defect
 // they were extracted from stays covered by tests.

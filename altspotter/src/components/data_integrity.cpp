@@ -257,6 +257,28 @@ public:
                 repair_window_end(from_ms, gap.end_ms, max_gap_minutes_per_cmd_);
             const int attempt = next_attempt_number(advanced, gap.attempts);
 
+            // No repair command may trigger a REST fetch into a retention-
+            // dropped month. Do not create a partition or burn attempts: the
+            // owner must first approve any recovery beyond current capacity.
+            bool partitions_present = false;
+            const auto partition_probe = pool_.with_txn([&](pqxx::work& txn) {
+                const auto row = txn.exec_params1(
+                    std::string(kRepairPartitionsPresentSql), from_ms, cmd_end);
+                partitions_present = row[0].as<bool>();
+            });
+            if (!partition_probe) {
+                log::error("repair_partition_probe_failed",
+                           {{"symbol", gap.symbol}, {"gap_id", gap.id},
+                            {"message", partition_probe.error().message}});
+                continue;
+            }
+            if (!partitions_present) {
+                log::warn("repair_deferred_partition_missing",
+                          {{"symbol", gap.symbol}, {"gap_id", gap.id},
+                           {"venue", gap.code}});
+                continue;
+            }
+
             messaging::EnvelopeMeta meta;
             meta.event_type = "history.repair.command";
             meta.exchange_id = gap.exchange_id;
