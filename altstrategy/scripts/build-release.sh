@@ -13,14 +13,14 @@ cd "$REPO_ROOT"
 
 VERSION="$(grep -oP '(?<=project\(altstrategy VERSION )[0-9.]+' CMakeLists.txt)"
 COMMIT="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-BUILD_DIR="${BUILD_DIR:-build/release}"
+BUILD_DIR="build/release"
 RELEASE="altstrategy-${VERSION}-linux-x86_64"
 STAGE="build/release-stage/${RELEASE}"
 
-echo "==> configure + build"
-cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DALTSTRATEGY_BUILD_TESTS=OFF
-cmake --build "$BUILD_DIR" --target \
-    altstrategy-service altstrategy-db-migrate altstrategy-nats-init altstrategy-config-check altstrategy-version
+echo "==> configure + build + tests"
+cmake --preset release
+cmake --build --preset release --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
+ctest --preset release --output-on-failure
 
 echo "==> staging ${RELEASE}"
 rm -rf "$STAGE"
